@@ -1,0 +1,4 @@
+.env
+docker-compose.yml
+docker/worker/Dockerfile.worker
+venv

@@ -1,0 +1,125 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-gray-50 text-gray-900;
+  }
+}
+
+@layer components {
+  .container-custom {
+    @apply max-w-7xl mx-auto px-4 sm:px-6 lg:px-8;
+  }
+}
+
+/* Fix text clipping in query responses */
+.prose {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  word-break: break-word;
+}
+
+.prose * {
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* Don't apply word-break to code blocks */
+.prose pre,
+.prose code {
+  word-wrap: normal;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+/* Syntax highlighting styles for code blocks */
+.hljs {
+  @apply bg-gray-900 text-gray-100 rounded-lg;
+  padding: 1rem;
+  overflow-x: auto;
+  overflow-y: visible !important;
+  line-height: 1.6 !important;
+  display: block;
+  font-size: 0.875rem;
+}
+
+/* Fix code block text clipping - ensure proper line height and no vertical overflow */
+pre {
+  line-height: 1.6 !important;
+  overflow-y: visible !important;
+  overflow-x: auto !important;
+  padding: 1rem !important;
+  margin: 1rem 0 !important;
+  background-color: #1f2937 !important;
+  border-radius: 0.5rem;
+}
+
+pre code {
+  line-height: 1.6 !important;
+  display: block;
+  overflow: visible !important;
+  white-space: pre;
+  word-wrap: normal;
+  overflow-wrap: normal;
+  font-size: 0.875rem;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+}
+
+/* Ensure prose doesn't interfere with code blocks */
+.prose pre {
+  line-height: 1.6 !important;
+  overflow-y: visible !important;
+  overflow-x: auto !important;
+}
+
+.prose pre code {
+  line-height: 1.6 !important;
+  overflow: visible !important;
+  white-space: pre !important;
+}
+
+.hljs-comment,
+.hljs-quote {
+  color: #6a737d;
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-type {
+  color: #d73a49;
+}
+
+.hljs-string,
+.hljs-literal {
+  color: #032f62;
+}
+
+.hljs-number {
+  color: #005cc5;
+}
+
+.hljs-function,
+.hljs-title {
+  color: #6f42c1;
+}
+
+.hljs-variable,
+.hljs-attr {
+  color: #e36209;
+}
+
+.hljs-built_in,
+.hljs-builtin-name {
+  color: #005cc5;
+}
+
+.hljs-meta {
+  color: #6a737d;
+}
+
+.hljs-tag {
+  color: #22863a;
+}

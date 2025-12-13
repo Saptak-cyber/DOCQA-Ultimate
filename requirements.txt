@@ -1,0 +1,15 @@
+fastapi
+uvicorn
+python-multipart
+pydantic
+pymongo
+redis
+supabase
+pyjwt
+pypdf
+sentence-transformers
+groq
+psycopg2-binary
+python-dotenv
+requests
+huggingface_hub
