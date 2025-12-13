@@ -191,30 +191,95 @@ def process_job(job):
 
     # Write embeddings in batches for better performance
     failed_writes = []
-    BATCH_WRITE_SIZE = 50  # Update multiple chunks at once
+    BATCH_WRITE_SIZE = 100  # Process in batches
     
+    # Fetch existing chunk data in batches to include all required fields for upsert
+    chunk_ids = [item["id"] for item in emb_list]
+    chunk_data_map = {}  # Map chunk_id -> existing chunk data
+    
+    # Fetch chunks in batches to get required fields (text, user_id, document_id, etc.)
+    FETCH_BATCH_SIZE = 1000  # Supabase limit
+    for fetch_start in range(0, len(chunk_ids), FETCH_BATCH_SIZE):
+        fetch_batch_ids = chunk_ids[fetch_start:fetch_start + FETCH_BATCH_SIZE]
+        try:
+            # Fetch existing chunks with all fields
+            existing_chunks = supabase.table("chunks") \
+                .select("id,text,user_id,document_id,page_number,chunk_index,tokens") \
+                .in_("id", fetch_batch_ids) \
+                .execute().data
+            
+            # Build map for quick lookup
+            for chunk in existing_chunks:
+                chunk_data_map[chunk["id"]] = chunk
+        except Exception as e:
+            log_warn(f"Failed to fetch chunk data for batch: {e}")
+            # Continue anyway - will fall back to individual updates
+    
+    # Now do bulk upsert with all required fields
     for batch_start in range(0, len(emb_list), BATCH_WRITE_SIZE):
         batch_items = emb_list[batch_start:batch_start + BATCH_WRITE_SIZE]
         
-        # Try batch update (Supabase supports this via upsert or multiple updates)
-        # For now, we'll do individual updates but in a batch loop for better error handling
-        for item in batch_items:
-            chunk_id = item["id"]
-            emb = item["embedding"]
-            try:
-                supabase.table("chunks").update({"embedding": emb}).eq("id", chunk_id).execute()
-            except Exception as e:
-                error_detail = str(e)
-                # Check if it's a dimension mismatch error
-                if "dimensions" in error_detail.lower():
-                    log_error(f"❌ Dimension mismatch for chunk {chunk_id}: {error_detail}")
-                    log_error(f"   Embedding has {len(emb)} dimensions")
+        # Try bulk upsert with all required fields
+        try:
+            update_payload = []
+            for item in batch_items:
+                chunk_id = item["id"]
+                emb = item["embedding"]
+                
+                # Get existing chunk data
+                existing_data = chunk_data_map.get(chunk_id)
+                if existing_data:
+                    # Include all required fields for upsert
+                    update_payload.append({
+                        "id": chunk_id,
+                        "embedding": emb,
+                        "text": existing_data.get("text"),  # Required NOT NULL
+                        "user_id": existing_data.get("user_id") or user_id,  # Required NOT NULL
+                        "document_id": existing_data.get("document_id") or doc_id,  # Required NOT NULL
+                        "page_number": existing_data.get("page_number"),
+                        "chunk_index": existing_data.get("chunk_index"),
+                        "tokens": existing_data.get("tokens")
+                    })
                 else:
-                    log_error(f"Failed to write embedding for chunk {chunk_id}: {error_detail}")
-                failed_writes.append(chunk_id)
+                    # Chunk not found in database - skip bulk upsert for this one
+                    log_warn(f"Chunk {chunk_id} not found in database, will update individually")
+                    # Will be handled in fallback
+            
+            if update_payload:
+                supabase.table("chunks").upsert(update_payload).execute()
+            
+            # Handle any chunks that weren't in the map (fallback to individual updates)
+            for item in batch_items:
+                if item["id"] not in chunk_data_map:
+                    chunk_id = item["id"]
+                    emb = item["embedding"]
+                    try:
+                        supabase.table("chunks").update({"embedding": emb}).eq("id", chunk_id).execute()
+                    except Exception as e2:
+                        log_error(f"Failed to write embedding for chunk {chunk_id}: {e2}")
+                        failed_writes.append(chunk_id)
+            
+        except Exception as e:
+            # Fall back to individual updates if bulk fails
+            log_warn(f"Bulk upsert failed for batch of {len(batch_items)}, falling back to individual updates: {e}")
+            for item in batch_items:
+                chunk_id = item["id"]
+                emb = item["embedding"]
+                try:
+                    supabase.table("chunks").update({"embedding": emb}).eq("id", chunk_id).execute()
+                except Exception as e2:
+                    log_error(f"Failed to write embedding for chunk {chunk_id}: {e2}")
+                    failed_writes.append(chunk_id)
         
-        if (batch_start + BATCH_WRITE_SIZE) % 100 == 0:
+        if (batch_start + BATCH_WRITE_SIZE) % 400 == 0:
             log_info(f"Progress: Written {min(batch_start + BATCH_WRITE_SIZE, len(emb_list))}/{len(emb_list)} embeddings...")
+    
+    # Always log final progress if not already logged at 400-interval boundary
+    if len(emb_list) > 0:
+        final_count = len(emb_list)
+        last_logged = (final_count // 400) * 400
+        if final_count != last_logged:
+            log_info(f"Progress: Written {final_count}/{final_count} embeddings...")
     
     if failed_writes:
         error_msg = f"Failed to write {len(failed_writes)} embeddings out of {len(emb_list)}"
