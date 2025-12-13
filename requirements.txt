@@ -6,6 +6,7 @@ pymongo
 redis
 supabase
 pyjwt
+pdfplumber
 pypdf
 sentence-transformers
 groq

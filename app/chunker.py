@@ -1,36 +1,79 @@
 # app/chunker.py
 import io
-from pypdf import PdfReader
+import pdfplumber
 import re
 from typing import Dict, Generator, Tuple
 
 def extract_pages_from_pdf_bytes(pdf_bytes: bytes) -> Dict[int, str]:
-    # returns dict: page_number (1-based) -> text
-    reader = PdfReader(io.BytesIO(pdf_bytes))
+    """
+    Extract all pages from PDF using pdfplumber (better for code extraction).
+    Returns dict: page_number (1-based) -> text
+    """
     pages = {}
-    for i, page in enumerate(reader.pages):
-        text = page.extract_text() or ""
-        # Normalize whitespace
-        text = re.sub(r"\s+", " ", text).strip()
-        pages[i + 1] = text
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for i, page in enumerate(pdf.pages):
+                # Use layout=True for better structure preservation (especially for code)
+                text = page.extract_text(layout=True) or ""
+                # Normalize whitespace for embeddings (but preserve structure)
+                text = re.sub(r"[ \t]+", " ", text)  # Normalize spaces/tabs
+                text = re.sub(r"\n\s*\n", "\n", text)  # Remove excessive blank lines
+                text = re.sub(r"\s+", " ", text).strip()  # Final normalization
+                pages[i + 1] = text
+    except Exception as e:
+        # Fallback to pypdf if pdfplumber fails
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text() or ""
+                text = re.sub(r"\s+", " ", text).strip()
+                pages[i + 1] = text
+        except Exception as fallback_error:
+            raise Exception(f"PDF extraction failed with both pdfplumber and pypdf: {e}, {fallback_error}")
     return pages
 
 def extract_pages_streaming(pdf_bytes: bytes) -> Generator[Tuple[int, str], None, None]:
     """
     Stream pages from PDF one at a time to avoid loading all pages into memory.
+    Uses pdfplumber for better code extraction.
     Yields (page_number, page_text) tuples.
     """
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    for i, page in enumerate(reader.pages):
-        text = page.extract_text() or ""
-        # Normalize whitespace
-        text = re.sub(r"\s+", " ", text).strip()
-        yield (i + 1, text)  # page_number is 1-based
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            for i, page in enumerate(pdf.pages):
+                # Use layout=True for better structure preservation (especially for code)
+                text = page.extract_text(layout=True) or ""
+                # Normalize whitespace for embeddings (but preserve structure)
+                text = re.sub(r"[ \t]+", " ", text)  # Normalize spaces/tabs
+                text = re.sub(r"\n\s*\n", "\n", text)  # Remove excessive blank lines
+                text = re.sub(r"\s+", " ", text).strip()  # Final normalization
+                yield (i + 1, text)  # page_number is 1-based
+    except Exception as e:
+        # Fallback to pypdf if pdfplumber fails
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            for i, page in enumerate(reader.pages):
+                text = page.extract_text() or ""
+                text = re.sub(r"\s+", " ", text).strip()
+                yield (i + 1, text)
+        except Exception as fallback_error:
+            raise Exception(f"PDF extraction failed with both pdfplumber and pypdf: {e}, {fallback_error}")
 
 def get_pdf_page_count(pdf_bytes: bytes) -> int:
     """Get total number of pages in PDF without extracting text."""
-    reader = PdfReader(io.BytesIO(pdf_bytes))
-    return len(reader.pages)
+    try:
+        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+            return len(pdf.pages)
+    except Exception as e:
+        # Fallback to pypdf if pdfplumber fails
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(pdf_bytes))
+            return len(reader.pages)
+        except Exception as fallback_error:
+            raise Exception(f"PDF page count failed with both pdfplumber and pypdf: {e}, {fallback_error}")
 
 def split_into_sentences(text: str):
     # naive sentence splitter
