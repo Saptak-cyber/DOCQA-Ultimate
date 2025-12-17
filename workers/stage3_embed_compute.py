@@ -10,6 +10,11 @@ import numpy as np
 from bson import ObjectId
 from pymongo import MongoClient
 from huggingface_hub import InferenceClient
+from fastapi import FastAPI, BackgroundTasks
+from fastapi.responses import JSONResponse
+import uvicorn
+from threading import Thread
+import httpx
 
 load_dotenv()
 
@@ -17,6 +22,7 @@ REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 MONGO_URI = os.getenv("MONGO_URI")
+WORKER_STAGE4_URL = os.getenv("WORKER_STAGE4_URL", "http://localhost:8004/health")
 
 # Hugging Face Inference API Configuration
 HF_API_KEY = os.getenv("HF_API_KEY")  # Get from https://huggingface.co/settings/tokens
@@ -228,6 +234,11 @@ def process_job(job):
         )
 
         log(f"Batch pushed to stage4 queue: {len(payload_batch)} embeddings.")
+        # Wake up stage4 worker
+        try:
+            httpx.get(WORKER_STAGE4_URL, timeout=5.0)
+        except:
+            pass  # Non-critical
         
         # Progress logging for large documents
         if total_chunks > 100:
@@ -241,7 +252,8 @@ def process_job(job):
     log(f"---- Completed Stage3 for document {doc_id} ----")
 
 def run():
-    log("Stage3 worker started. Waiting for jobs in queue:stage3")
+    """Queue-based worker loop (runs in background thread)"""
+    log("Stage3 worker loop started. Waiting for jobs in queue:stage3")
     
     if USE_HF_API:
         if not HF_API_KEY:
@@ -257,7 +269,11 @@ def run():
     
     while True:
         try:
-            _, payload = r.brpop("queue:stage3")
+            result = r.brpop("queue:stage3", timeout=30)
+            if result is None:
+                continue  # Timeout, check again
+            
+            _, payload = result
             try:
                 job = json.loads(payload)
             except json.JSONDecodeError as e:
@@ -297,5 +313,37 @@ def run():
             traceback.print_exc()
             log("Waiting for next job...")
 
+# FastAPI app for HTTP endpoints
+worker_app = FastAPI(title="Stage3 Worker")
+
+@worker_app.get("/health")
+async def health():
+    """Health check endpoint - used to wake up the worker"""
+    return {"status": "ok", "worker": "stage3"}
+
+@worker_app.post("/process")
+async def process_job_endpoint(job: dict, background_tasks: BackgroundTasks):
+    """HTTP endpoint to process a job directly"""
+    doc_id = job.get("document_id")
+    user_id = job.get("user_id")
+    
+    if not doc_id or not user_id:
+        return JSONResponse(
+            {"error": "Missing document_id or user_id"},
+            status_code=400
+        )
+    
+    # Process in background
+    background_tasks.add_task(process_job, job)
+    return {"status": "processing", "document_id": doc_id}
+
 if __name__ == "__main__":
-    run()
+    # Start queue worker in background thread
+    worker_thread = Thread(target=run, daemon=True)
+    worker_thread.start()
+    log("Queue worker thread started")
+    
+    # Start HTTP server
+    port = int(os.getenv("PORT", "8000"))
+    log(f"Starting HTTP server on port {port}")
+    uvicorn.run(worker_app, host="0.0.0.0", port=port)

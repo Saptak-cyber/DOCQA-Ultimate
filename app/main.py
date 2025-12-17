@@ -4,7 +4,7 @@ import hashlib
 import json
 import uuid
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Header, Body
+from fastapi import FastAPI, File, UploadFile, Depends, HTTPException, Header, Body, BackgroundTasks
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
@@ -16,6 +16,7 @@ import datetime
 import jwt  # for decoding JWT; you can replace with your library
 from supabase import create_client
 from app.retrieval import router as retrieval_router
+import httpx
 
 # Load environment variables from .env for local runs
 load_dotenv()
@@ -28,6 +29,12 @@ SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "documents")
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
+
+# Worker URLs for wake-up calls (set in environment variables)
+WORKER_STAGE1_URL = os.getenv("WORKER_STAGE1_URL", "http://localhost:8001/health")
+WORKER_STAGE2_URL = os.getenv("WORKER_STAGE2_URL", "http://localhost:8002/health")
+WORKER_STAGE3_URL = os.getenv("WORKER_STAGE3_URL", "http://localhost:8003/health")
+WORKER_STAGE4_URL = os.getenv("WORKER_STAGE4_URL", "http://localhost:8004/health")
 # ---------- END CONFIG ----------
 
 mongo = MongoClient(MONGO_URI)
@@ -72,6 +79,16 @@ def sync_document_to_supabase(doc_id, mongo_doc):
     except Exception as e:
         # Don't fail the main operation if Supabase sync fails
         print(f"Warning: Failed to sync document {doc_id} to Supabase: {e}")
+
+async def wake_worker(worker_url: str, worker_name: str):
+    """Wake up a worker by calling its health endpoint (non-blocking)"""
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            await client.get(worker_url)
+            print(f"✅ Woke up {worker_name}")
+    except Exception as e:
+        # Don't fail if worker wake-up fails - job is still in queue
+        print(f"⚠️ Failed to wake {worker_name} (this is OK, worker will wake when processing): {e}")
 
 app = FastAPI()
 
@@ -134,7 +151,7 @@ async def login(email: str = Body(...), password: str = Body(...)):
 
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...), authorization: str = Header(...)):
+async def upload_file(file: UploadFile = File(...), authorization: str = Header(...), background_tasks: BackgroundTasks = BackgroundTasks()):
     user_id = get_user_id_from_jwt(authorization)
     filename = file.filename
 
@@ -184,6 +201,10 @@ async def upload_file(file: UploadFile = File(...), authorization: str = Header(
     # push job to stage1 queue (extract)
     job = json.dumps({"document_id": doc_id, "user_id": user_id})
     r.lpush("queue:stage1", job)
+
+    # Wake up stage1 worker (non-blocking)
+    # This ensures the worker wakes up on Render free tier when a job is queued
+    background_tasks.add_task(wake_worker, WORKER_STAGE1_URL, "stage1 worker")
 
     return {"status": "queued", "document_id": doc_id}
 

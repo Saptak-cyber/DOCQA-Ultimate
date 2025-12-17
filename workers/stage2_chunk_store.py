@@ -91,6 +91,11 @@ import uuid
 from bson import ObjectId
 from pymongo import MongoClient
 from supabase import create_client
+from fastapi import FastAPI, BackgroundTasks
+from fastapi.responses import JSONResponse
+import uvicorn
+from threading import Thread
+import httpx
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.chunker import chunks_from_pages, chunks_from_page
@@ -108,6 +113,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+WORKER_STAGE3_URL = os.getenv("WORKER_STAGE3_URL", "http://localhost:8003/health")
 
 mongo = MongoClient(MONGO_URI)
 db = mongo.get_default_database()
@@ -341,6 +347,11 @@ def process_job(job):
             stage3_job = {"document_id": doc_id, "user_id": user_id_raw}
             r.lpush("queue:stage3", json.dumps(stage3_job))
             log_info(f"✅ Successfully enqueued to queue:stage3")
+            # Wake up stage3 worker
+            try:
+                httpx.get(WORKER_STAGE3_URL, timeout=5.0)
+            except:
+                pass  # Non-critical
         except Exception as e:
             log_error(f"❌ Failed to enqueue to Stage 3: {e}")
             import traceback
@@ -351,11 +362,16 @@ def process_job(job):
 
 
 def run():
-    print("\033[92m[STAGE2] Worker started. Waiting for jobs...\033[0m")
+    """Queue-based worker loop (runs in background thread)"""
+    print("\033[92m[STAGE2] Worker loop started. Waiting for jobs from queue...\033[0m")
     while True:
         try:
             log_info("Waiting for job from queue:stage2...")
-            _, payload = r.brpop("queue:stage2")
+            result = r.brpop("queue:stage2", timeout=30)
+            if result is None:
+                continue  # Timeout, check again
+            
+            _, payload = result
             log_info(f"Received job payload (length: {len(payload)} chars)")
             
             try:
@@ -410,5 +426,37 @@ def run():
             log_info("Continuing to next iteration...")
             continue
 
+# FastAPI app for HTTP endpoints
+worker_app = FastAPI(title="Stage2 Worker")
+
+@worker_app.get("/health")
+async def health():
+    """Health check endpoint - used to wake up the worker"""
+    return {"status": "ok", "worker": "stage2"}
+
+@worker_app.post("/process")
+async def process_job_endpoint(job: dict, background_tasks: BackgroundTasks):
+    """HTTP endpoint to process a job directly"""
+    doc_id = job.get("document_id")
+    user_id = job.get("user_id")
+    
+    if not doc_id or not user_id:
+        return JSONResponse(
+            {"error": "Missing document_id or user_id"},
+            status_code=400
+        )
+    
+    # Process in background
+    background_tasks.add_task(process_job, job)
+    return {"status": "processing", "document_id": doc_id}
+
 if __name__ == "__main__":
-    run()
+    # Start queue worker in background thread
+    worker_thread = Thread(target=run, daemon=True)
+    worker_thread.start()
+    log_info("Queue worker thread started")
+    
+    # Start HTTP server
+    port = int(os.getenv("PORT", "8000"))
+    log_info(f"Starting HTTP server on port {port}")
+    uvicorn.run(worker_app, host="0.0.0.0", port=port)

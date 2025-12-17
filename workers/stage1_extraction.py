@@ -7,6 +7,11 @@ from bson import ObjectId
 from pymongo import MongoClient
 import redis
 from supabase import create_client
+from fastapi import FastAPI, BackgroundTasks
+from fastapi.responses import JSONResponse
+import uvicorn
+from threading import Thread
+import httpx
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.chunker import extract_pages_from_pdf_bytes, extract_pages_streaming, get_pdf_page_count
@@ -56,6 +61,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+WORKER_STAGE2_URL = os.getenv("WORKER_STAGE2_URL", "http://localhost:8002/health")
 
 mongo = MongoClient(MONGO_URI)
 db = mongo.get_default_database()
@@ -170,6 +176,11 @@ def process_job(job):
                     }
                     r.lpush("queue:stage2", json.dumps(stage2_job))
                     log_info(f"Sent batch to Stage 2: pages {min(current_batch.keys())}-{max(current_batch.keys())} ({pages_processed}/{total_pages})")
+                    # Wake up stage2 worker
+                    try:
+                        httpx.get(WORKER_STAGE2_URL, timeout=5.0)
+                    except:
+                        pass  # Non-critical
                     current_batch = {}
             
             log_info(f"✅ Streaming extraction complete: {pages_processed}/{total_pages} pages sent to Stage 2")
@@ -190,6 +201,11 @@ def process_job(job):
             }
             r.lpush("queue:stage2", json.dumps(stage2_job))
             log_info("Sent all pages to Stage 2")
+            # Wake up stage2 worker
+            try:
+                httpx.get(WORKER_STAGE2_URL, timeout=5.0)
+            except:
+                pass  # Non-critical
         
         # Update status to extracted (without storing pages_text in MongoDB)
         documents_col.update_one(
@@ -224,10 +240,16 @@ def process_job(job):
 
 
 def run():
-    print("\033[92m[STAGE1] Worker started. Waiting for jobs...\033[0m")
+    """Queue-based worker loop (runs in background thread)"""
+    print("\033[92m[STAGE1] Worker loop started. Waiting for jobs from queue...\033[0m")
     while True:
         try:
-            _, payload = r.brpop("queue:stage1")
+            # Use timeout to allow periodic checks
+            result = r.brpop("queue:stage1", timeout=30)
+            if result is None:
+                continue  # Timeout, check again
+            
+            _, payload = result
             try:
                 job = json.loads(payload)
             except json.JSONDecodeError as e:
@@ -268,8 +290,40 @@ def run():
             log_error(traceback.format_exc())
             continue  # DO NOT STOP WORKER
 
+# FastAPI app for HTTP endpoints
+worker_app = FastAPI(title="Stage1 Worker")
+
+@worker_app.get("/health")
+async def health():
+    """Health check endpoint - used to wake up the worker"""
+    return {"status": "ok", "worker": "stage1"}
+
+@worker_app.post("/process")
+async def process_job_endpoint(job: dict, background_tasks: BackgroundTasks):
+    """HTTP endpoint to process a job directly"""
+    doc_id = job.get("document_id")
+    user_id = job.get("user_id")
+    
+    if not doc_id or not user_id:
+        return JSONResponse(
+            {"error": "Missing document_id or user_id"},
+            status_code=400
+        )
+    
+    # Process in background
+    background_tasks.add_task(process_job, job)
+    return {"status": "processing", "document_id": doc_id}
+
 if __name__ == "__main__":
-    run()
+    # Start queue worker in background thread
+    worker_thread = Thread(target=run, daemon=True)
+    worker_thread.start()
+    log_info("Queue worker thread started")
+    
+    # Start HTTP server
+    port = int(os.getenv("PORT", "8000"))
+    log_info(f"Starting HTTP server on port {port}")
+    uvicorn.run(worker_app, host="0.0.0.0", port=port)
 
 # def run():
 #     print("Stage1 worker started, blocking on queue:stage1")

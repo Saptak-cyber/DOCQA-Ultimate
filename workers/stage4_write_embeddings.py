@@ -100,6 +100,10 @@ from supabase import create_client
 from pymongo import MongoClient
 import numpy as np
 from bson import ObjectId
+from fastapi import FastAPI, BackgroundTasks
+from fastapi.responses import JSONResponse
+import uvicorn
+from threading import Thread
 
 load_dotenv()
 
@@ -504,10 +508,15 @@ def process_job(job):
         sync_document_to_supabase(doc_id, updated_doc)
 
 def run():
-    print("\033[92m[STAGE4] Worker started. Waiting for jobs...\033[0m")
+    """Queue-based worker loop (runs in background thread)"""
+    print("\033[92m[STAGE4] Worker loop started. Waiting for jobs from queue...\033[0m")
     while True:
         try:
-            _, payload = r.brpop("queue:stage4")
+            result = r.brpop("queue:stage4", timeout=30)
+            if result is None:
+                continue  # Timeout, check again
+            
+            _, payload = result
             try:
                 job = json.loads(payload)
             except json.JSONDecodeError as e:
@@ -548,5 +557,37 @@ def run():
             log_error(traceback.format_exc())
             continue
 
+# FastAPI app for HTTP endpoints
+worker_app = FastAPI(title="Stage4 Worker")
+
+@worker_app.get("/health")
+async def health():
+    """Health check endpoint - used to wake up the worker"""
+    return {"status": "ok", "worker": "stage4"}
+
+@worker_app.post("/process")
+async def process_job_endpoint(job: dict, background_tasks: BackgroundTasks):
+    """HTTP endpoint to process a job directly"""
+    doc_id = job.get("document_id")
+    user_id = job.get("user_id")
+    
+    if not doc_id or not user_id:
+        return JSONResponse(
+            {"error": "Missing document_id or user_id"},
+            status_code=400
+        )
+    
+    # Process in background
+    background_tasks.add_task(process_job, job)
+    return {"status": "processing", "document_id": doc_id}
+
 if __name__ == "__main__":
-    run()
+    # Start queue worker in background thread
+    worker_thread = Thread(target=run, daemon=True)
+    worker_thread.start()
+    log_info("Queue worker thread started")
+    
+    # Start HTTP server
+    port = int(os.getenv("PORT", "8000"))
+    log_info(f"Starting HTTP server on port {port}")
+    uvicorn.run(worker_app, host="0.0.0.0", port=port)
