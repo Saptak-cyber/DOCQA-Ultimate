@@ -60,18 +60,20 @@ export function DocumentList() {
 
   if (error) {
     return (
-      <Alert type="error" className="mb-6">
-        {error}
-        <Button
-          variant="secondary"
-          size="sm"
-          onClick={fetchDocuments}
-          className="mt-4"
-        >
+      <div className="mb-6">
+        <Alert type="error">
+          {error}
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={fetchDocuments}
+            className="mt-4"
+          >
           <RefreshCw className="h-4 w-4 mr-2" />
           Retry
         </Button>
       </Alert>
+    </div>
     );
   }
 
