@@ -42,9 +42,11 @@ export function LoginForm() {
       </div>
 
       {error && (
-        <Alert type="error" className="mb-6">
-          {error}
-        </Alert>
+        <div className="mb-6">
+          <Alert type="error">
+            {error}
+          </Alert>
+        </div>
       )}
 
       <form onSubmit={handleSubmit(onSubmit)} className="space-y-6">
