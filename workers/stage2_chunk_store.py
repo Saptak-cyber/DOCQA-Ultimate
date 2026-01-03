@@ -349,7 +349,7 @@ def process_job(job):
             log_info(f"✅ Successfully enqueued to queue:stage3")
             # Wake up stage3 worker
             try:
-                httpx.get(WORKER_STAGE3_URL, timeout=180.0)
+                httpx.get(WORKER_STAGE3_URL, timeout=30.0)
                 log_info(f"✅ Woke up stage3 worker at {WORKER_STAGE3_URL}")
             except Exception as e:
                 log_warn(f"⚠️ Failed to wake stage3 worker: {e}")

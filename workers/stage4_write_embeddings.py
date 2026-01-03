@@ -512,7 +512,7 @@ def run():
     print("\033[92m[STAGE4] Worker loop started. Waiting for jobs from queue...\033[0m")
     while True:
         try:
-            result = r.brpop("queue:stage4", timeout=180)
+            result = r.brpop("queue:stage4", timeout=30)
             if result is None:
                 continue  # Timeout, check again
             

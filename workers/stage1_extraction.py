@@ -178,7 +178,7 @@ def process_job(job):
                     log_info(f"Sent batch to Stage 2: pages {min(current_batch.keys())}-{max(current_batch.keys())} ({pages_processed}/{total_pages})")
                     # Wake up stage2 worker
                     try:
-                        with httpx.Client(timeout=180.0) as client:
+                        with httpx.Client(timeout=30.0) as client:
                             client.get(WORKER_STAGE2_URL)
                     except Exception as e:
                         log_warn(f"Failed to wake stage2 worker: {e}")  # Log instead of silent fail

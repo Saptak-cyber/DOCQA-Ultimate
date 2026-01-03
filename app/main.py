@@ -83,7 +83,7 @@ def sync_document_to_supabase(doc_id, mongo_doc):
 async def wake_worker(worker_url: str, worker_name: str):
     """Wake up a worker by calling its health endpoint"""
     try:
-        async with httpx.AsyncClient(timeout=180.0) as client:
+        async with httpx.AsyncClient(timeout=30.0) as client:
             response = await client.get(worker_url)
             print(f"[WAKE] {worker_name} health check: {response.status_code}")
     except Exception as e:
@@ -102,6 +102,18 @@ app.add_middleware(
 
 # Include retrieval router
 app.include_router(retrieval_router)
+
+# Health check endpoint for Render
+@app.get("/health")
+async def health():
+    """Health check endpoint - Render uses this to verify the service is running"""
+    return {"status": "ok", "service": "docqa-api"}
+
+# Root endpoint
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {"message": "DOCQA Ultimate API", "status": "running"}
 
 
 def hash_password(password: str) -> str:

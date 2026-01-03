@@ -236,7 +236,7 @@ def process_job(job):
         log(f"Batch pushed to stage4 queue: {len(payload_batch)} embeddings.")
         # Wake up stage4 worker
         try:
-            httpx.get(WORKER_STAGE4_URL, timeout=180.0)
+            httpx.get(WORKER_STAGE4_URL, timeout=30.0)
             log(f"✅ Woke up stage4 worker at {WORKER_STAGE4_URL}")
         except Exception as e:
             log(f"⚠️ Failed to wake stage4 worker: {e}")
