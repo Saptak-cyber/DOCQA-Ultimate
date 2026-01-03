@@ -81,11 +81,11 @@ def sync_document_to_supabase(doc_id, mongo_doc):
         print(f"Warning: Failed to sync document {doc_id} to Supabase: {e}")
 
 async def wake_worker(worker_url: str, worker_name: str):
-    """Wake up a worker by calling its health endpoint (non-blocking)"""
+    """Wake up a worker by calling its health endpoint"""
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            await client.get(worker_url)
-            print(f"✅ Woke up {worker_name}")
+        async with httpx.AsyncClient(timeout=180.0) as client:
+            response = await client.get(worker_url)
+            print(f"[WAKE] {worker_name} health check: {response.status_code}")
     except Exception as e:
         # Don't fail if worker wake-up fails - job is still in queue
         print(f"⚠️ Failed to wake {worker_name} (this is OK, worker will wake when processing): {e}")
@@ -203,9 +203,8 @@ async def upload_file(file: UploadFile = File(...), authorization: str = Header(
     r.lpush("queue:stage1", job)
 
     # Wake up stage1 worker (non-blocking)
-    # This ensures the worker wakes up on Render free tier when a job is queued
     background_tasks.add_task(wake_worker, WORKER_STAGE1_URL, "stage1 worker")
-
+    
     return {"status": "queued", "document_id": doc_id}
 
 # Backward-compatible route (if older clients call /upload)

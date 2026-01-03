@@ -178,9 +178,10 @@ def process_job(job):
                     log_info(f"Sent batch to Stage 2: pages {min(current_batch.keys())}-{max(current_batch.keys())} ({pages_processed}/{total_pages})")
                     # Wake up stage2 worker
                     try:
-                        httpx.get(WORKER_STAGE2_URL, timeout=5.0)
-                    except:
-                        pass  # Non-critical
+                        with httpx.Client(timeout=180.0) as client:
+                            client.get(WORKER_STAGE2_URL)
+                    except Exception as e:
+                        log_warn(f"Failed to wake stage2 worker: {e}")  # Log instead of silent fail
                     current_batch = {}
             
             log_info(f"✅ Streaming extraction complete: {pages_processed}/{total_pages} pages sent to Stage 2")
@@ -203,9 +204,10 @@ def process_job(job):
             log_info("Sent all pages to Stage 2")
             # Wake up stage2 worker
             try:
-                httpx.get(WORKER_STAGE2_URL, timeout=5.0)
-            except:
-                pass  # Non-critical
+                with httpx.Client(timeout=30.0) as client:
+                    client.get(WORKER_STAGE2_URL)
+            except Exception as e:
+                log_warn(f"Failed to wake stage2 worker: {e}")  # Log instead of silent fail
         
         # Update status to extracted (without storing pages_text in MongoDB)
         documents_col.update_one(

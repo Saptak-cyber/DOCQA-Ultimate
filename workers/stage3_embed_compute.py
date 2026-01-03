@@ -236,9 +236,10 @@ def process_job(job):
         log(f"Batch pushed to stage4 queue: {len(payload_batch)} embeddings.")
         # Wake up stage4 worker
         try:
-            httpx.get(WORKER_STAGE4_URL, timeout=5.0)
-        except:
-            pass  # Non-critical
+            httpx.get(WORKER_STAGE4_URL, timeout=180.0)
+            log(f"✅ Woke up stage4 worker at {WORKER_STAGE4_URL}")
+        except Exception as e:
+            log(f"⚠️ Failed to wake stage4 worker: {e}")
         
         # Progress logging for large documents
         if total_chunks > 100:
