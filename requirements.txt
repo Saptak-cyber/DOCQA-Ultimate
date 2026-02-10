@@ -8,9 +8,9 @@ supabase
 pyjwt
 pdfplumber
 pypdf
-sentence-transformers
+# sentence-transformers
 groq
-psycopg2-binary
+# psycopg2-binary
 python-dotenv
 requests
 huggingface_hub
