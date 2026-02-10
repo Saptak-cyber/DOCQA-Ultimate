@@ -2,7 +2,7 @@
 import io
 import pdfplumber
 import re
-from typing import Dict, Generator, Tuple
+from typing import Dict, Generator, Tuple, Union
 
 def extract_pages_from_pdf_bytes(pdf_bytes: bytes) -> Dict[int, str]:
     """
@@ -33,14 +33,24 @@ def extract_pages_from_pdf_bytes(pdf_bytes: bytes) -> Dict[int, str]:
             raise Exception(f"PDF extraction failed with both pdfplumber and pypdf: {e}, {fallback_error}")
     return pages
 
-def extract_pages_streaming(pdf_bytes: bytes) -> Generator[Tuple[int, str], None, None]:
+def extract_pages_streaming(pdf_source: Union[str, bytes]) -> Generator[Tuple[int, str], None, None]:
     """
     Stream pages from PDF one at a time to avoid loading all pages into memory.
     Uses pdfplumber for better code extraction.
+    
+    Args:
+        pdf_source: Either a file path (str) or PDF bytes (bytes)
+    
     Yields (page_number, page_text) tuples.
     """
     try:
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        # Support both file paths and bytes
+        if isinstance(pdf_source, str):
+            pdf_context = pdfplumber.open(pdf_source)
+        else:
+            pdf_context = pdfplumber.open(io.BytesIO(pdf_source))
+        
+        with pdf_context as pdf:
             for i, page in enumerate(pdf.pages):
                 # Use layout=True for better structure preservation (especially for code)
                 text = page.extract_text(layout=True) or ""
@@ -53,7 +63,10 @@ def extract_pages_streaming(pdf_bytes: bytes) -> Generator[Tuple[int, str], None
         # Fallback to pypdf if pdfplumber fails
         try:
             from pypdf import PdfReader
-            reader = PdfReader(io.BytesIO(pdf_bytes))
+            if isinstance(pdf_source, str):
+                reader = PdfReader(pdf_source)
+            else:
+                reader = PdfReader(io.BytesIO(pdf_source))
             for i, page in enumerate(reader.pages):
                 text = page.extract_text() or ""
                 text = re.sub(r"\s+", " ", text).strip()
@@ -61,16 +74,32 @@ def extract_pages_streaming(pdf_bytes: bytes) -> Generator[Tuple[int, str], None
         except Exception as fallback_error:
             raise Exception(f"PDF extraction failed with both pdfplumber and pypdf: {e}, {fallback_error}")
 
-def get_pdf_page_count(pdf_bytes: bytes) -> int:
-    """Get total number of pages in PDF without extracting text."""
+def get_pdf_page_count(pdf_source: Union[str, bytes]) -> int:
+    """
+    Get total number of pages in PDF without extracting text.
+    
+    Args:
+        pdf_source: Either a file path (str) or PDF bytes (bytes)
+    
+    Returns:
+        Total number of pages
+    """
     try:
-        with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+        if isinstance(pdf_source, str):
+            pdf_context = pdfplumber.open(pdf_source)
+        else:
+            pdf_context = pdfplumber.open(io.BytesIO(pdf_source))
+        
+        with pdf_context as pdf:
             return len(pdf.pages)
     except Exception as e:
         # Fallback to pypdf if pdfplumber fails
         try:
             from pypdf import PdfReader
-            reader = PdfReader(io.BytesIO(pdf_bytes))
+            if isinstance(pdf_source, str):
+                reader = PdfReader(pdf_source)
+            else:
+                reader = PdfReader(io.BytesIO(pdf_source))
             return len(reader.pages)
         except Exception as fallback_error:
             raise Exception(f"PDF page count failed with both pdfplumber and pypdf: {e}, {fallback_error}")

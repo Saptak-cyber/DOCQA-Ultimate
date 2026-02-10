@@ -1,6 +1,7 @@
 # workers/stage1_extraction.py
 import os, json, sys
 import uuid
+import tempfile
 from dotenv import load_dotenv
 from bson import ObjectId
 from pymongo import MongoClient
@@ -57,6 +58,73 @@ def log_info(msg): print(f"\033[94m[STAGE1][INFO]\033[0m {msg}")
 def log_warn(msg): print(f"\033[93m[STAGE1][WARN]\033[0m {msg}")
 def log_error(msg): print(f"\033[91m[STAGE1][ERROR]\033[0m {msg}")
 
+def stream_pdf_from_supabase(bucket: str, path: str, doc_id: str) -> str:
+    """
+    Stream PDF from Supabase Storage to a temporary file on disk.
+    Returns the temporary file path.
+    
+    This avoids loading the entire PDF into memory, which is critical for
+    large PDFs (100MB+) on memory-constrained workers (512MB RAM).
+    
+    Args:
+        bucket: Supabase storage bucket name
+        path: Path to file in bucket
+        doc_id: Document ID (used for temp filename)
+    
+    Returns:
+        str: Path to temporary file
+    
+    Raises:
+        Exception: If download fails
+    """
+    try:
+        # Get signed URL for streaming download
+        signed_url = supabase.storage.from_(bucket).create_signed_url(path, 3600)  # 1 hour expiry
+        download_url = signed_url.get('signedURL') or signed_url.get('signedUrl')
+        
+        if not download_url:
+            raise Exception(f"Failed to get signed URL for {bucket}/{path}")
+        
+        # Create temp file
+        temp_file_path = os.path.join(tempfile.gettempdir(), f"{doc_id}.pdf")
+        log_info(f"Streaming PDF to temp file: {temp_file_path}")
+        
+        # Stream download in chunks to avoid memory overload
+        downloaded_bytes = 0
+        chunk_size = 10 * 1024 * 1024  # 10MB chunks
+        
+        with httpx.stream("GET", download_url, timeout=300.0) as response:
+            response.raise_for_status()
+            total_size = int(response.headers.get('content-length', 0))
+            
+            with open(temp_file_path, 'wb') as f:
+                for chunk in response.iter_bytes(chunk_size=chunk_size):
+                    f.write(chunk)
+                    downloaded_bytes += len(chunk)
+                    
+                    # Log progress every 50MB
+                    if downloaded_bytes % (50 * 1024 * 1024) < chunk_size:
+                        progress_mb = downloaded_bytes / (1024 * 1024)
+                        total_mb = total_size / (1024 * 1024) if total_size else 0
+                        if total_mb > 0:
+                            log_info(f"Download progress: {progress_mb:.1f}MB / {total_mb:.1f}MB ({100*downloaded_bytes/total_size:.1f}%)")
+                        else:
+                            log_info(f"Download progress: {progress_mb:.1f}MB")
+        
+        file_size_mb = downloaded_bytes / (1024 * 1024)
+        log_info(f"✅ PDF downloaded to disk: {file_size_mb:.2f}MB at {temp_file_path}")
+        return temp_file_path
+        
+    except httpx.HTTPError as e:
+        log_error(f"HTTP error while streaming PDF: {e}")
+        raise Exception(f"Failed to stream PDF from Supabase: {e}")
+    except OSError as e:
+        log_error(f"Disk I/O error while saving PDF: {e}")
+        raise Exception(f"Failed to write PDF to disk (check disk space): {e}")
+    except Exception as e:
+        log_error(f"Unexpected error while streaming PDF: {e}")
+        raise
+
 MONGO_URI = os.getenv("MONGO_URI")
 REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379/0")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
@@ -72,6 +140,7 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 def process_job(job):
     doc_id = job.get("document_id")
     user_id = job.get("user_id")
+    pdf_temp_path = None  # Track temp file for cleanup
     
     if not doc_id or not user_id:
         log_error(f"Invalid job payload: missing document_id or user_id")
@@ -119,11 +188,34 @@ def process_job(job):
             sync_document_to_supabase(doc_id, failed_doc)
         return
 
+    # Validate PDF size before downloading (avoid OOM on large files)
+    MAX_FILE_SIZE_MB = 100
+    file_size_bytes = storage.get("bytes", 0)
+    file_size_mb = file_size_bytes / (1024 * 1024)
+    
+    if file_size_mb > MAX_FILE_SIZE_MB:
+        error_msg = f"PDF file too large: {file_size_mb:.1f}MB (max {MAX_FILE_SIZE_MB}MB). Please split the document or contact support."
+        log_error(error_msg)
+        documents_col.update_one(
+            {"_id": ObjectId(doc_id)},
+            {
+                "$set": {"status": "failed"},
+                "$push": {"processingErrors": error_msg}
+            }
+        )
+        # Sync failed status to Supabase
+        failed_doc = documents_col.find_one({"_id": ObjectId(doc_id)})
+        if failed_doc:
+            sync_document_to_supabase(doc_id, failed_doc)
+        return
+    
+    log_info(f"PDF size: {file_size_mb:.2f}MB (within {MAX_FILE_SIZE_MB}MB limit)")
+
     try:
-        log_info(f"Downloading PDF from Supabase Storage bucket={bucket} path={path}")
-        pdf_bytes = supabase.storage.from_(bucket).download(path)
+        log_info(f"Streaming PDF from Supabase Storage bucket={bucket} path={path}")
+        pdf_temp_path = stream_pdf_from_supabase(bucket, path, doc_id)
     except Exception as e:
-        log_error(f"Failed to download PDF from Supabase: {e}")
+        log_error(f"Failed to stream PDF from Supabase: {e}")
         documents_col.update_one(
             {"_id": ObjectId(doc_id)},
             {
@@ -140,7 +232,7 @@ def process_job(job):
     try:
         # Get total page count first (for progress tracking)
         log_info("Getting PDF page count...")
-        total_pages = get_pdf_page_count(pdf_bytes)
+        total_pages = get_pdf_page_count(pdf_temp_path)
         log_info(f"PDF has {total_pages} pages")
         
         # Update MongoDB with page count (but NOT pages_text to avoid 16MB limit)
@@ -160,7 +252,7 @@ def process_job(job):
             PAGE_BATCH_SIZE = 100  # Send pages in batches to Stage 2
             
             current_batch = {}
-            for page_num, page_text in extract_pages_streaming(pdf_bytes):
+            for page_num, page_text in extract_pages_streaming(pdf_temp_path):
                 current_batch[page_num] = page_text
                 pages_processed += 1
                 
@@ -188,8 +280,12 @@ def process_job(job):
         else:
             # For smaller documents, use batch mode (backward compatible)
             log_info("Using batch extraction for smaller document")
+            # Read PDF bytes for backward compatibility with extract_pages_from_pdf_bytes
+            with open(pdf_temp_path, 'rb') as f:
+                pdf_bytes = f.read()
             pages = extract_pages_from_pdf_bytes(pdf_bytes)
             log_info(f"Extracted {len(pages)} pages")
+            del pdf_bytes  # Free memory
             
             # Send all pages to Stage 2 in one job
             stage2_job = {
@@ -239,6 +335,14 @@ def process_job(job):
         if failed_doc:
             sync_document_to_supabase(doc_id, failed_doc)
         return
+    finally:
+        # Always cleanup temp file
+        if pdf_temp_path and os.path.exists(pdf_temp_path):
+            try:
+                os.remove(pdf_temp_path)
+                log_info(f"✅ Cleaned up temp file: {pdf_temp_path}")
+            except Exception as cleanup_err:
+                log_warn(f"Failed to delete temp file {pdf_temp_path}: {cleanup_err}")
 
 
 def run():
