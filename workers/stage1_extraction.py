@@ -1,5 +1,4 @@
 # workers/stage1_extraction.py
-# workers/stage1_extraction.py
 import os, json, sys
 import uuid
 from dotenv import load_dotenv
@@ -13,7 +12,6 @@ from fastapi.responses import JSONResponse
 import uvicorn
 from threading import Thread
 import httpx
-import gc
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.chunker import extract_pages_from_pdf_bytes, extract_pages_streaming, get_pdf_page_count
@@ -72,115 +70,176 @@ r = redis.from_url(REDIS_URL, decode_responses=True)
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 def process_job(job):
-    doc_id = job["document_id"]
-    user_id = job["user_id"]
+    doc_id = job.get("document_id")
+    user_id = job.get("user_id")
     
-    log_info(f"Processing document {doc_id}")
-    
-    # 1. Fetch document from MongoDB
-    mongo_doc = documents_col.find_one({"_id": ObjectId(doc_id)})
-    if not mongo_doc:
-        log_error(f"Document {doc_id} not found in MongoDB")
+    if not doc_id or not user_id:
+        log_error(f"Invalid job payload: missing document_id or user_id")
         return
-    
-    # 2. Update status to extracting
-    documents_col.update_one(
-        {"_id": ObjectId(doc_id)},
-        {"$set": {"status": "extracting"}}
-    )
-    sync_document_to_supabase(doc_id, {**mongo_doc, "status": "extracting"})
-    
-    # 3. Download PDF from Supabase Storage
-    storage = mongo_doc.get("storage", {})
-    storage_bucket = storage.get("bucket")
-    storage_path = storage.get("path")
-    
-    if not storage_bucket or not storage_path:
-        log_error(f"No storage info found for document {doc_id}")
-        documents_col.update_one(
-            {"_id": ObjectId(doc_id)},
-            {"$set": {"status": "failed"}, "$push": {"processingErrors": "No storage information"}}
-        )
-        return
-    
+
+    log_info(f"Starting Stage 1 for document {doc_id}")
+
     try:
-        log_info(f"Downloading PDF from Supabase Storage: {storage_bucket}/{storage_path}")
-        pdf_bytes = supabase.storage.from_(storage_bucket).download(storage_path)
-        log_info(f"Downloaded {len(pdf_bytes)} bytes")
-    except Exception as download_err:
-        log_error(f"Failed to download PDF from Supabase Storage: {download_err}")
-        documents_col.update_one(
-            {"_id": ObjectId(doc_id)},
-            {"$set": {"status": "failed"}, "$push": {"processingErrors": f"Download failed: {str(download_err)}"}}
-        )
-        return
-    
-    # 4. Stream pages and save in batches (memory efficient)
-    pages_batch = {}
-    batch_size = 10
-    total_pages = 0
-    
-    log_info(f"Starting PDF extraction for {doc_id}")
-    
-    for page_num, page_text in extract_pages_streaming(pdf_bytes):
-        pages_batch[str(page_num)] = page_text
-        total_pages += 1
-        
-        if len(pages_batch) >= batch_size:
-            # Save batch to MongoDB
-            update_dict = {f"pages_text.{k}": v for k, v in pages_batch.items()}
+        doc = documents_col.find_one({"_id": ObjectId(doc_id)})
+        if not doc:
+            log_error(f"Document {doc_id} not found in MongoDB.")
             documents_col.update_one(
                 {"_id": ObjectId(doc_id)},
-                {"$set": update_dict}
+                {
+                    "$set": {"status": "failed"},
+                    "$push": {"processingErrors": f"Document {doc_id} not found in MongoDB"}
+                }
             )
-            log_info(f"Saved batch of {len(pages_batch)} pages")
-            pages_batch = {}
-            gc.collect()  # Force garbage collection
+            return
+    except Exception as e:
+        log_error(f"Error querying MongoDB for document {doc_id}: {e}")
+        return
+
+    documents_col.update_one({"_id": ObjectId(doc_id)}, {"$set":{"status":"processing"}})
+    log_info("Status updated to processing")
     
-    # 5. Save remaining pages
-    if pages_batch:
-        update_dict = {f"pages_text.{k}": v for k, v in pages_batch.items()}
+    # Sync status change to Supabase
+    sync_document_to_supabase(doc_id, doc)
+
+    storage = doc.get("storage", {})
+    bucket, path = storage.get("bucket"), storage.get("path")
+
+    if not bucket or not path:
+        log_error("Storage info missing in MongoDB document.")
         documents_col.update_one(
             {"_id": ObjectId(doc_id)},
-            {"$set": update_dict}
-        )
-        log_info(f"Saved final batch of {len(pages_batch)} pages")
-        gc.collect()
-    
-    # 6. Update status and page count
-    documents_col.update_one(
-        {"_id": ObjectId(doc_id)},
-        {
-            "$set": {
-                "status": "extracted",
-                "page_count": total_pages
+            {
+                "$set": {"status": "failed"},
+                "$push": {"processingErrors": "Missing bucket/path in storage info"}
             }
-        }
-    )
-    
-    # 7. Sync to Supabase
-    updated_doc = documents_col.find_one({"_id": ObjectId(doc_id)})
-    sync_document_to_supabase(doc_id, updated_doc)
-    
-    log_info(f"✅ Extracted {total_pages} pages from document {doc_id}")
-    
-    # 8. Push to stage2 queue
-    stage2_job = {
-        "document_id": doc_id,
-        "user_id": user_id
-    }
-    r.lpush("queue:stage2", json.dumps(stage2_job))
-    log_info(f"Pushed to stage2 queue: {doc_id}")
-    
-    # 9. Wake up stage2 worker
+        )
+        # Sync failed status to Supabase
+        failed_doc = documents_col.find_one({"_id": ObjectId(doc_id)})
+        if failed_doc:
+            sync_document_to_supabase(doc_id, failed_doc)
+        return
+
     try:
-        httpx.get(WORKER_STAGE2_URL, timeout=5)
-        log_info(f"✅ Woke up stage2 worker at {WORKER_STAGE2_URL}")
+        log_info(f"Downloading PDF from Supabase Storage bucket={bucket} path={path}")
+        pdf_bytes = supabase.storage.from_(bucket).download(path)
     except Exception as e:
-        log_warn(f"Failed to wake stage2 worker: {e}")
-    
-    # 10. Final cleanup
-    gc.collect()
+        log_error(f"Failed to download PDF from Supabase: {e}")
+        documents_col.update_one(
+            {"_id": ObjectId(doc_id)},
+            {
+                "$set": {"status": "failed"},
+                "$push": {"processingErrors": f"PDF download failed: {str(e)}"}
+            }
+        )
+        # Sync failed status to Supabase
+        failed_doc = documents_col.find_one({"_id": ObjectId(doc_id)})
+        if failed_doc:
+            sync_document_to_supabase(doc_id, failed_doc)
+        return
+
+    try:
+        # Get total page count first (for progress tracking)
+        log_info("Getting PDF page count...")
+        total_pages = get_pdf_page_count(pdf_bytes)
+        log_info(f"PDF has {total_pages} pages")
+        
+        # Update MongoDB with page count (but NOT pages_text to avoid 16MB limit)
+        documents_col.update_one(
+            {"_id": ObjectId(doc_id)},
+            {"$set": {"page_count": total_pages}}
+        )
+        
+        # For very large documents, use streaming extraction
+        # For smaller documents (< 1000 pages), we can still use batch mode for efficiency
+        USE_STREAMING = total_pages >= 1000  # Use streaming for 1000+ pages
+        
+        if USE_STREAMING:
+            log_info(f"Using streaming extraction for large document ({total_pages} pages)")
+            # Stream pages and send to Stage 2 queue incrementally
+            pages_processed = 0
+            PAGE_BATCH_SIZE = 100  # Send pages in batches to Stage 2
+            
+            current_batch = {}
+            for page_num, page_text in extract_pages_streaming(pdf_bytes):
+                current_batch[page_num] = page_text
+                pages_processed += 1
+                
+                # Send batch to Stage 2 when batch is full or at end
+                if len(current_batch) >= PAGE_BATCH_SIZE or pages_processed == total_pages:
+                    stage2_job = {
+                        "document_id": doc_id,
+                        "user_id": user_id,
+                        "pages": current_batch,  # Send pages directly in job
+                        "is_final_batch": pages_processed == total_pages,
+                        "total_pages": total_pages,
+                        "pages_processed": pages_processed
+                    }
+                    r.lpush("queue:stage2", json.dumps(stage2_job))
+                    log_info(f"Sent batch to Stage 2: pages {min(current_batch.keys())}-{max(current_batch.keys())} ({pages_processed}/{total_pages})")
+                    # Wake up stage2 worker
+                    try:
+                        with httpx.Client(timeout=30.0) as client:
+                            client.get(WORKER_STAGE2_URL)
+                    except Exception as e:
+                        log_warn(f"Failed to wake stage2 worker: {e}")  # Log instead of silent fail
+                    current_batch = {}
+            
+            log_info(f"✅ Streaming extraction complete: {pages_processed}/{total_pages} pages sent to Stage 2")
+        else:
+            # For smaller documents, use batch mode (backward compatible)
+            log_info("Using batch extraction for smaller document")
+            pages = extract_pages_from_pdf_bytes(pdf_bytes)
+            log_info(f"Extracted {len(pages)} pages")
+            
+            # Send all pages to Stage 2 in one job
+            stage2_job = {
+                "document_id": doc_id,
+                "user_id": user_id,
+                "pages": pages,
+                "is_final_batch": True,
+                "total_pages": len(pages),
+                "pages_processed": len(pages)
+            }
+            r.lpush("queue:stage2", json.dumps(stage2_job))
+            log_info("Sent all pages to Stage 2")
+            # Wake up stage2 worker
+            try:
+                with httpx.Client(timeout=30.0) as client:
+                    client.get(WORKER_STAGE2_URL)
+            except Exception as e:
+                log_warn(f"Failed to wake stage2 worker: {e}")  # Log instead of silent fail
+        
+        # Update status to extracted (without storing pages_text in MongoDB)
+        documents_col.update_one(
+            {"_id": ObjectId(doc_id)},
+            {"$set": {"status": "extracted"}}
+        )
+        log_info("Status updated to extracted")
+        
+        # Sync to Supabase documents table
+        updated_doc = documents_col.find_one({"_id": ObjectId(doc_id)})
+        if updated_doc:
+            sync_document_to_supabase(doc_id, updated_doc)
+        
+        log_info("Stage 1 finished. Pages sent to Stage 2 queue.")
+        
+    except Exception as e:
+        log_error(f"Failed to extract pages from PDF: {e}")
+        import traceback
+        log_error(traceback.format_exc())
+        documents_col.update_one(
+            {"_id": ObjectId(doc_id)},
+            {
+                "$set": {"status": "failed"},
+                "$push": {"processingErrors": f"Page extraction failed: {str(e)}"}
+            }
+        )
+        # Sync failed status to Supabase
+        failed_doc = documents_col.find_one({"_id": ObjectId(doc_id)})
+        if failed_doc:
+            sync_document_to_supabase(doc_id, failed_doc)
+        return
+
 
 def run():
     """Queue-based worker loop (runs in background thread)"""
@@ -276,20 +335,3 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", "8000"))
     log_info(f"Starting HTTP server on port {port}")
     uvicorn.run(worker_app, host="0.0.0.0", port=port)
-
-# def run():
-#     print("Stage1 worker started, blocking on queue:stage1")
-#     while True:
-#         _, payload = r.brpop("queue:stage1")
-#         job = json.loads(payload)
-#         try:
-#             process_job(job)
-#         except Exception as e:
-#             print("Stage1 failed:", e)
-#             # store error in mongo
-#             documents_col.update_one({"_id": ObjectId(job["document_id"])}, {"$push": {"processingErrors": str(e)}})
-#             # mark failed
-#             documents_col.update_one({"_id": ObjectId(job["document_id"])}, {"$set": {"status":"failed"}})
-
-# if __name__ == "__main__":
-#     run()
