@@ -30,6 +30,13 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 SUPABASE_STORAGE_BUCKET = os.getenv("SUPABASE_STORAGE_BUCKET", "documents")
 FRONTEND_ORIGIN = os.getenv("FRONTEND_ORIGIN", "http://localhost:3000")
 
+# Support multiple CORS origins (production + development)
+CORS_ORIGINS = [
+    "https://docqa-ultimate.vercel.app",  # Production frontend
+    "http://localhost:3000",               # Local development
+    FRONTEND_ORIGIN,                       # Custom origin from env var
+]
+
 # Worker URLs for wake-up calls (set in environment variables)
 WORKER_STAGE1_URL = os.getenv("WORKER_STAGE1_URL", "http://localhost:8001/health")
 WORKER_STAGE2_URL = os.getenv("WORKER_STAGE2_URL", "http://localhost:8002/health")
@@ -94,7 +101,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_ORIGIN],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
