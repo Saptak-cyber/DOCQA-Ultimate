@@ -90,13 +90,28 @@ def process_job(job):
     )
     sync_document_to_supabase(doc_id, {**mongo_doc, "status": "extracting"})
     
-    # 3. Get PDF bytes
-    pdf_bytes = mongo_doc.get("pdf_bytes")
-    if not pdf_bytes:
-        log_error(f"No pdf_bytes found for document {doc_id}")
+    # 3. Download PDF from Supabase Storage
+    storage = mongo_doc.get("storage", {})
+    storage_bucket = storage.get("bucket")
+    storage_path = storage.get("path")
+    
+    if not storage_bucket or not storage_path:
+        log_error(f"No storage info found for document {doc_id}")
         documents_col.update_one(
             {"_id": ObjectId(doc_id)},
-            {"$set": {"status": "failed"}, "$push": {"processingErrors": "No PDF data"}}
+            {"$set": {"status": "failed"}, "$push": {"processingErrors": "No storage information"}}
+        )
+        return
+    
+    try:
+        log_info(f"Downloading PDF from Supabase Storage: {storage_bucket}/{storage_path}")
+        pdf_bytes = supabase.storage.from_(storage_bucket).download(storage_path)
+        log_info(f"Downloaded {len(pdf_bytes)} bytes")
+    except Exception as download_err:
+        log_error(f"Failed to download PDF from Supabase Storage: {download_err}")
+        documents_col.update_one(
+            {"_id": ObjectId(doc_id)},
+            {"$set": {"status": "failed"}, "$push": {"processingErrors": f"Download failed: {str(download_err)}"}}
         )
         return
     
