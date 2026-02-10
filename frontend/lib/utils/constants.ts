@@ -1,5 +1,11 @@
 export const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
+// Worker URLs for warmup pinging
+export const WORKER_STAGE1_URL = process.env.NEXT_PUBLIC_WORKER_STAGE1_URL || 'http://localhost:8001';
+export const WORKER_STAGE2_URL = process.env.NEXT_PUBLIC_WORKER_STAGE2_URL || 'http://localhost:8002';
+export const WORKER_STAGE3_URL = process.env.NEXT_PUBLIC_WORKER_STAGE3_URL || 'http://localhost:8003';
+export const WORKER_STAGE4_URL = process.env.NEXT_PUBLIC_WORKER_STAGE4_URL || 'http://localhost:8004';
+
 export const TOKEN_KEY = 'docqa_token';
 export const USER_KEY = 'docqa_user';
 

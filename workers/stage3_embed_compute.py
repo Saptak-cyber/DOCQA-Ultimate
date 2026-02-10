@@ -11,6 +11,7 @@ from bson import ObjectId
 from pymongo import MongoClient
 from huggingface_hub import InferenceClient
 from fastapi import FastAPI, BackgroundTasks
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import uvicorn
 from threading import Thread
@@ -316,6 +317,15 @@ def run():
 
 # FastAPI app for HTTP endpoints
 worker_app = FastAPI(title="Stage3 Worker")
+
+# Add CORS middleware to allow frontend warmup pings
+worker_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://docqa-ultimate.vercel.app", "http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["*"],
+)
 
 @worker_app.get("/health")
 async def health():
