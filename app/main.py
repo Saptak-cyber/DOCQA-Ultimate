@@ -62,6 +62,16 @@ def convert_user_id_to_uuid(user_id):
         user_uuid = uuid.uuid5(EMAIL_TO_UUID_NAMESPACE, str(user_id))
         return str(user_uuid)
 
+def ensure_utc_iso(dt_value):
+    """Return ISO string with UTC offset for datetime values."""
+    if not isinstance(dt_value, datetime.datetime):
+        return None
+    if dt_value.tzinfo is None:
+        dt_value = dt_value.replace(tzinfo=datetime.timezone.utc)
+    else:
+        dt_value = dt_value.astimezone(datetime.timezone.utc)
+    return dt_value.isoformat()
+
 def sync_document_to_supabase(doc_id, mongo_doc):
     """Sync MongoDB document to Supabase documents table."""
     try:
@@ -79,7 +89,7 @@ def sync_document_to_supabase(doc_id, mongo_doc):
             "storage_public_url": storage.get("public_url"),
             "status": mongo_doc.get("status", "uploaded"),
             "pages": mongo_doc.get("page_count"),
-            "created_at": mongo_doc.get("createdAt", datetime.datetime.utcnow()).isoformat() if isinstance(mongo_doc.get("createdAt"), datetime.datetime) else None
+            "created_at": ensure_utc_iso(mongo_doc.get("createdAt"))
         }
         
         supabase.table("documents").upsert(supabase_doc).execute()
@@ -152,7 +162,7 @@ async def signup(email: str = Body(...), password: str = Body(...)):
         {
             "email": email,
             "password_hash": hash_password(password),
-            "createdAt": datetime.datetime.utcnow(),
+            "createdAt": datetime.datetime.now(datetime.timezone.utc),
         }
     )
     token = create_jwt(email)
@@ -209,7 +219,7 @@ async def upload_file(file: UploadFile = File(...), authorization: str = Header(
         "metadata": {
             "hash": sha
         },
-        "createdAt": datetime.datetime.utcnow()
+        "createdAt": datetime.datetime.now(datetime.timezone.utc)
     }
     inserted = documents_col.insert_one(doc)
     doc_id = str(inserted.inserted_id)
@@ -253,6 +263,9 @@ async def list_documents(authorization: str = Header(...)):
         for d in cursor:
             d["_id"] = str(d.get("_id"))
             docs.append(d)
+    for d in docs:
+        if isinstance(d.get("createdAt"), datetime.datetime):
+            d["createdAt"] = ensure_utc_iso(d.get("createdAt"))
     return docs
 
 
