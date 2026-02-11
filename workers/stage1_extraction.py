@@ -302,7 +302,7 @@ def process_job(job):
                     log_info(f"Sent batch to Stage 2: pages {min(current_batch.keys())}-{max(current_batch.keys())} ({pages_processed}/{total_pages})")
                     
                     # Wake up stage2 worker asynchronously (non-blocking)
-                    threading.Thread(target=wake_worker_async, args=(WORKER_STAGE2_URL,), daemon=True).start()
+                    Thread(target=wake_worker_async, args=(WORKER_STAGE2_URL,), daemon=True).start()
                     
                     current_batch = {}
                     # Force garbage collection after each batch to free memory
