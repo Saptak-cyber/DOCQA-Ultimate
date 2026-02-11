@@ -4,6 +4,7 @@ import uuid
 import tempfile
 import gc
 import resource
+import httpx
 from dotenv import load_dotenv
 from bson import ObjectId
 from pymongo import MongoClient
@@ -14,7 +15,6 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import uvicorn
 from threading import Thread
-import httpx
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.chunker import extract_pages_from_pdf_bytes, extract_pages_streaming, get_pdf_page_count
@@ -150,6 +150,14 @@ db = mongo.get_default_database()
 documents_col = db["documents"]
 r = redis.from_url(REDIS_URL, decode_responses=True)
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+def wake_worker_async(url: str):
+    """Wake worker asynchronously without blocking."""
+    try:
+        with httpx.Client(timeout=5.0) as client:
+            client.get(url)
+    except Exception as e:
+        log_warn(f"Failed to wake worker at {url}: {e}")
 
 def process_job(job):
     doc_id = job.get("document_id")
@@ -292,12 +300,10 @@ def process_job(job):
                     }
                     r.lpush("queue:stage2", json.dumps(stage2_job))
                     log_info(f"Sent batch to Stage 2: pages {min(current_batch.keys())}-{max(current_batch.keys())} ({pages_processed}/{total_pages})")
-                    # Wake up stage2 worker
-                    try:
-                        with httpx.Client(timeout=30.0) as client:
-                            client.get(WORKER_STAGE2_URL)
-                    except Exception as e:
-                        log_warn(f"Failed to wake stage2 worker: {e}")  # Log instead of silent fail
+                    
+                    # Wake up stage2 worker asynchronously (non-blocking)
+                    threading.Thread(target=wake_worker_async, args=(WORKER_STAGE2_URL,), daemon=True).start()
+                    
                     current_batch = {}
                     # Force garbage collection after each batch to free memory
                     gc.collect()
