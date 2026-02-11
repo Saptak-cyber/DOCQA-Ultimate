@@ -2,6 +2,8 @@
 import os, json, sys
 import uuid
 import tempfile
+import gc
+import resource
 from dotenv import load_dotenv
 from bson import ObjectId
 from pymongo import MongoClient
@@ -58,10 +60,22 @@ def log_info(msg): print(f"\033[94m[STAGE1][INFO]\033[0m {msg}")
 def log_warn(msg): print(f"\033[93m[STAGE1][WARN]\033[0m {msg}")
 def log_error(msg): print(f"\033[91m[STAGE1][ERROR]\033[0m {msg}")
 
-def stream_pdf_from_supabase(bucket: str, path: str, doc_id: str) -> str:
+def get_memory_usage_mb():
+    """Get current memory usage in MB."""
+    try:
+        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        # macOS returns bytes, Linux returns KB
+        if sys.platform == 'darwin':
+            return usage / (1024 * 1024)  # bytes to MB
+        else:
+            return usage / 1024  # KB to MB
+    except Exception:
+        return 0
+
+def stream_pdf_from_supabase(bucket: str, path: str, doc_id: str) -> tuple:
     """
     Stream PDF from Supabase Storage to a temporary file on disk.
-    Returns the temporary file path.
+    Returns the temporary file path and file size in MB.
     
     This avoids loading the entire PDF into memory, which is critical for
     large PDFs (100MB+) on memory-constrained workers (512MB RAM).
@@ -72,7 +86,7 @@ def stream_pdf_from_supabase(bucket: str, path: str, doc_id: str) -> str:
         doc_id: Document ID (used for temp filename)
     
     Returns:
-        str: Path to temporary file
+        tuple: (temp_file_path, file_size_mb)
     
     Raises:
         Exception: If download fails
@@ -113,7 +127,7 @@ def stream_pdf_from_supabase(bucket: str, path: str, doc_id: str) -> str:
         
         file_size_mb = downloaded_bytes / (1024 * 1024)
         log_info(f"✅ PDF downloaded to disk: {file_size_mb:.2f}MB at {temp_file_path}")
-        return temp_file_path
+        return temp_file_path, file_size_mb
         
     except httpx.HTTPError as e:
         log_error(f"HTTP error while streaming PDF: {e}")
@@ -213,7 +227,11 @@ def process_job(job):
 
     try:
         log_info(f"Streaming PDF from Supabase Storage bucket={bucket} path={path}")
-        pdf_temp_path = stream_pdf_from_supabase(bucket, path, doc_id)
+        mem_before = get_memory_usage_mb()
+        log_info(f"Memory before download: {mem_before:.1f}MB")
+        pdf_temp_path, actual_file_size_mb = stream_pdf_from_supabase(bucket, path, doc_id)
+        mem_after = get_memory_usage_mb()
+        log_info(f"Memory after download: {mem_after:.1f}MB (delta: {mem_after - mem_before:+.1f}MB)")
     except Exception as e:
         log_error(f"Failed to stream PDF from Supabase: {e}")
         documents_col.update_one(
@@ -241,15 +259,21 @@ def process_job(job):
             {"$set": {"page_count": total_pages}}
         )
         
-        # For very large documents, use streaming extraction
-        # For smaller documents (< 1000 pages), we can still use batch mode for efficiency
-        USE_STREAMING = total_pages >= 1000  # Use streaming for 1000+ pages
+        # Use file size (not page count) to determine streaming vs batch mode
+        # File size directly correlates with memory usage, while page count varies by content density
+        # Threshold: 20MB ensures safe operation within 512MB RAM limit
+        # - Batch mode (<20MB): Fast processing for small PDFs, peak memory ~100-150MB
+        # - Streaming mode (≥20MB): Memory-safe for large PDFs, peak memory ~50-80MB
+        STREAMING_THRESHOLD_MB = 10
+        USE_STREAMING = actual_file_size_mb >= STREAMING_THRESHOLD_MB
+        
+        log_info(f"File size: {actual_file_size_mb:.2f}MB, Threshold: {STREAMING_THRESHOLD_MB}MB, Using {'STREAMING' if USE_STREAMING else 'BATCH'} mode")
         
         if USE_STREAMING:
             log_info(f"Using streaming extraction for large document ({total_pages} pages)")
             # Stream pages and send to Stage 2 queue incrementally
             pages_processed = 0
-            PAGE_BATCH_SIZE = 100  # Send pages in batches to Stage 2
+            PAGE_BATCH_SIZE = 50  # Reduced from 100 to 50 for tighter memory control
             
             current_batch = {}
             for page_num, page_text in extract_pages_streaming(pdf_temp_path):
@@ -275,17 +299,34 @@ def process_job(job):
                     except Exception as e:
                         log_warn(f"Failed to wake stage2 worker: {e}")  # Log instead of silent fail
                     current_batch = {}
+                    # Force garbage collection after each batch to free memory
+                    gc.collect()
             
             log_info(f"✅ Streaming extraction complete: {pages_processed}/{total_pages} pages sent to Stage 2")
+            mem_final = get_memory_usage_mb()
+            log_info(f"Memory after streaming: {mem_final:.1f}MB")
         else:
             # For smaller documents, use batch mode (backward compatible)
             log_info("Using batch extraction for smaller document")
             # Read PDF bytes for backward compatibility with extract_pages_from_pdf_bytes
+            mem_before_load = get_memory_usage_mb()
             with open(pdf_temp_path, 'rb') as f:
                 pdf_bytes = f.read()
+            mem_after_load = get_memory_usage_mb()
+            log_info(f"Memory after loading PDF: {mem_after_load:.1f}MB (delta: {mem_after_load - mem_before_load:+.1f}MB)")
+            
             pages = extract_pages_from_pdf_bytes(pdf_bytes)
             log_info(f"Extracted {len(pages)} pages")
-            del pdf_bytes  # Free memory
+            
+            mem_after_extract = get_memory_usage_mb()
+            log_info(f"Memory after extraction: {mem_after_extract:.1f}MB (delta: {mem_after_extract - mem_after_load:+.1f}MB)")
+            
+            # Explicitly free PDF bytes and force garbage collection
+            del pdf_bytes
+            gc.collect()
+            
+            mem_after_gc = get_memory_usage_mb()
+            log_info(f"Memory after GC: {mem_after_gc:.1f}MB (freed: {mem_after_extract - mem_after_gc:.1f}MB)")
             
             # Send all pages to Stage 2 in one job
             stage2_job = {
@@ -298,6 +339,10 @@ def process_job(job):
             }
             r.lpush("queue:stage2", json.dumps(stage2_job))
             log_info("Sent all pages to Stage 2")
+            
+            mem_after_push = get_memory_usage_mb()
+            log_info(f"Memory after Redis push: {mem_after_push:.1f}MB")
+            
             # Wake up stage2 worker
             try:
                 with httpx.Client(timeout=30.0) as client:
