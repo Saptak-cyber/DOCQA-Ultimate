@@ -1,7 +1,13 @@
+export interface ConversationMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export interface QueryRequest {
   query: string;
   top_docs?: number;
   top_chunks?: number;
+  conversation_history?: ConversationMessage[];
 }
 
 export interface Source {
@@ -16,4 +22,12 @@ export interface Source {
 export interface QueryResponse {
   answer: string;
   sources: Source[];
+}
+
+export interface ChatMessage {
+  id: string;
+  role: 'user' | 'assistant';
+  content: string;
+  sources?: Source[];
+  timestamp: number;
 }

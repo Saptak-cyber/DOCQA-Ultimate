@@ -66,10 +66,15 @@ def get_user_id_from_jwt(authorization: str):
         raise HTTPException(status_code=401, detail="Invalid token")
 
 # ------------ Request Schema -------------
+class ConversationMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+
 class QueryRequest(BaseModel):
     query: str
     top_docs: int = 3
     top_chunks: int = 20
+    conversation_history: Optional[List[ConversationMessage]] = []
 
 # ------------ Response Schema -------------
 class QueryResponse(BaseModel):
@@ -161,8 +166,8 @@ def get_document_titles(doc_ids: List[str]) -> dict:
         return {}
 
 # ------------ Helper: Build LLM prompt -------------
-def build_prompt(query: str, chunks: List[dict], doc_titles: dict) -> str:
-    """Build prompt with context chunks and citations."""
+def build_prompt(query: str, chunks: List[dict], doc_titles: dict, conversation_history: List[dict] = None) -> tuple:
+    """Build prompt with context chunks, citations, and conversation history."""
     context_str = ""
     for c in chunks:
         doc_id = c.get("document_id", "Unknown")
@@ -174,16 +179,26 @@ def build_prompt(query: str, chunks: List[dict], doc_titles: dict) -> str:
             f"{text}\n"
         )
     
-    prompt = f"""You are a RAG assistant. Answer using ONLY the provided context.
+    system_message = """You are a RAG assistant. Answer using ONLY the provided context.
 
 If the answer is not in the context, reply: "I don't know based on the provided documents."
 
 Include citations in this format exactly:
-(Page X from [Document Title])
-
--------------------------
-
-USER QUERY:
+(Page X from [Document Title])"""
+    
+    # Build messages array with conversation history
+    messages = [{"role": "system", "content": system_message}]
+    
+    # Add conversation history if provided
+    if conversation_history:
+        for msg in conversation_history:
+            messages.append({
+                "role": msg.role,
+                "content": msg.content
+            })
+    
+    # Add current query with context
+    user_message = f"""USER QUERY:
 {query}
 
 -------------------------
@@ -195,7 +210,9 @@ CONTEXT:
 
 Give your final answer now:"""
     
-    return prompt
+    messages.append({"role": "user", "content": user_message})
+    
+    return messages
 
 # ------------ The Query Endpoint -------------
 @router.post("/api/query", response_model=QueryResponse)
@@ -253,24 +270,15 @@ async def query_rag(req: QueryRequest, authorization: str = Header(...)):
     # Step 4 — Get document titles for better citations
     doc_titles = get_document_titles(doc_ids)
     
-    # Step 5 — Build LLM prompt
-    prompt = build_prompt(req.query, chunk_matches, doc_titles)
+    # Step 5 — Build LLM prompt with conversation history
+    messages = build_prompt(req.query, chunk_matches, doc_titles, req.conversation_history)
     
     # Step 6 — Call Groq LLM
     print(f"🧠 Calling Groq LLM ({GROQ_MODEL})...")
     try:
         completion = groq_client.chat.completions.create(
             model=GROQ_MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are a helpful assistant that answers questions based on provided context. Always cite your sources using the format: (Page X from [Document Title]). If the answer cannot be found in the context, reply: 'I don't know based on the provided documents.'"
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
+            messages=messages,
             temperature=0.1,
             max_tokens=1024,
             top_p=0.9,
