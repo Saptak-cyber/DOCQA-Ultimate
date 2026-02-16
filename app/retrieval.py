@@ -181,6 +181,8 @@ def build_prompt(query: str, chunks: List[dict], doc_titles: dict, conversation_
     
     system_message = """You are a RAG assistant. Answer using ONLY the provided context.
 
+If the user asks for an answer from a particular document by name, prioritize information from that specific document in your response.
+
 If the answer is not in the context, reply: "I don't know based on the provided documents."
 
 Include citations in this format exactly:
