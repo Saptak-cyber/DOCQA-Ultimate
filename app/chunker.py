@@ -104,14 +104,48 @@ def get_pdf_page_count(pdf_source: Union[str, bytes]) -> int:
         except Exception as fallback_error:
             raise Exception(f"PDF page count failed with both pdfplumber and pypdf: {e}, {fallback_error}")
 
+def split_into_semantic_blocks(text: str):
+    """
+    Split text into semantic blocks that respect document structure:
+    - Paragraphs (double newlines)
+    - Numbered/bulleted lists (keep together)
+    - Headers and sections
+    """
+    blocks = []
+    
+    # Split by double newlines (paragraphs) first
+    paragraphs = re.split(r'\n\s*\n', text)
+    
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        
+        # Check if this is a list (numbered or bulleted)
+        # Pattern: starts with number/bullet and has multiple items
+        list_pattern = r'^[\s]*(?:\d+[\.\)]\s+|[-•*]\s+)'
+        if re.match(list_pattern, para):
+            # Check if it contains multiple list items
+            list_items = re.split(r'\n(?=[\s]*(?:\d+[\.\)]\s+|[-•*]\s+))', para)
+            if len(list_items) > 1:
+                # Keep the entire list together as one block
+                blocks.append(para)
+                continue
+        
+        # For regular paragraphs, split into sentences if too long
+        sentences = re.split(r'(?<=[.?!])\s+', para)
+        blocks.extend([s.strip() for s in sentences if s.strip()])
+    
+    return blocks
+
 def split_into_sentences(text: str):
-    # naive sentence splitter
+    # naive sentence splitter (kept for backward compatibility)
     sentences = re.split(r'(?<=[.?!])\s+', text)
     return [s.strip() for s in sentences if s.strip()]
 
 def chunks_from_page(page_text: str, page_number: int, start_chunk_idx: int = 0, max_tokens: int = 500, overlap: int = 50):
     """
-    Chunk a single page of text. Returns list of chunks.
+    Chunk a single page of text using semantic blocks (respects paragraphs, lists, etc.).
     start_chunk_idx: Starting chunk index (for maintaining global chunk numbering across pages)
     """
     if not page_text or not page_text.strip():
@@ -122,19 +156,38 @@ def chunks_from_page(page_text: str, page_number: int, start_chunk_idx: int = 0,
     
     chunks = []
     chunk_idx = start_chunk_idx
-    sents = split_into_sentences(page_text)
+    blocks = split_into_semantic_blocks(page_text)
     i = 0
     
-    while i < len(sents):
-        chunk_sentences = []
+    while i < len(blocks):
+        chunk_blocks = []
         token_count = 0
-        while i < len(sents) and token_count < max_tokens:
-            sent_words = len(sents[i].split())
-            chunk_sentences.append(sents[i])
-            token_count += sent_words
+        
+        # Add blocks until we hit the token limit
+        while i < len(blocks):
+            block_words = len(blocks[i].split())
+            
+            # If adding this block would exceed limit and we already have content, stop
+            if token_count > 0 and token_count + block_words > max_tokens:
+                break
+            
+            # If a single block is larger than max_tokens, split it by sentences
+            if block_words > max_tokens:
+                sentences = split_into_sentences(blocks[i])
+                for sent in sentences:
+                    sent_words = len(sent.split())
+                    if token_count + sent_words > max_tokens and token_count > 0:
+                        break
+                    chunk_blocks.append(sent)
+                    token_count += sent_words
+                i += 1
+                break
+            
+            chunk_blocks.append(blocks[i])
+            token_count += block_words
             i += 1
         
-        chunk_text = " ".join(chunk_sentences).strip()
+        chunk_text = " ".join(chunk_blocks).strip()
         if chunk_text:
             chunks.append({
                 "page_number": page_number,
@@ -144,25 +197,24 @@ def chunks_from_page(page_text: str, page_number: int, start_chunk_idx: int = 0,
             })
             chunk_idx += 1
         
-        # Backtrack for overlap
-        back_words = overlap
-        original_i = i
-        while back_words > 0 and i > 0:
-            i -= 1
-            back_words -= len(sents[i].split())
-            if i == 0 and back_words > 0:
-                break
-        
-        # Ensure forward progress
-        if i < original_i - len(chunk_sentences) // 2:
-            i = original_i - len(chunk_sentences) // 2
-        if i < 0:
-            i = 0
+        # Backtrack for overlap (by words, not blocks)
+        if i < len(blocks):
+            back_words = overlap
+            temp_i = i - 1
+            while back_words > 0 and temp_i >= 0:
+                block_words = len(blocks[temp_i].split())
+                back_words -= block_words
+                temp_i -= 1
+            # Move back but ensure forward progress
+            i = max(temp_i + 1, i - len(chunk_blocks) // 2)
     
     return chunks
 
 def chunks_from_pages(pages: Dict[int,str], max_tokens:int=500, overlap:int=50):
-    # approximate tokens by words count (simple)
+    """
+    Create semantic chunks from pages that respect document structure.
+    Uses semantic blocks (paragraphs, lists) instead of just sentences.
+    """
     if not pages:
         return []
     
@@ -171,19 +223,41 @@ def chunks_from_pages(pages: Dict[int,str], max_tokens:int=500, overlap:int=50):
     
     all_chunks = []
     chunk_idx = 0
+    
     for page_no in sorted(pages.keys()):
         text = pages[page_no]
-        sents = split_into_sentences(text)
+        blocks = split_into_semantic_blocks(text)
         i = 0
-        while i < len(sents):
-            chunk_sentences = []
+        
+        while i < len(blocks):
+            chunk_blocks = []
             token_count = 0
-            while i < len(sents) and token_count < max_tokens:
-                sent_words = len(sents[i].split())
-                chunk_sentences.append(sents[i])
-                token_count += sent_words
+            
+            # Add blocks until we hit the token limit
+            while i < len(blocks):
+                block_words = len(blocks[i].split())
+                
+                # If adding this block would exceed limit and we already have content, stop
+                if token_count > 0 and token_count + block_words > max_tokens:
+                    break
+                
+                # If a single block is larger than max_tokens, split it by sentences
+                if block_words > max_tokens:
+                    sentences = split_into_sentences(blocks[i])
+                    for sent in sentences:
+                        sent_words = len(sent.split())
+                        if token_count + sent_words > max_tokens and token_count > 0:
+                            break
+                        chunk_blocks.append(sent)
+                        token_count += sent_words
+                    i += 1
+                    break
+                
+                chunk_blocks.append(blocks[i])
+                token_count += block_words
                 i += 1
-            chunk_text = " ".join(chunk_sentences).strip()
+            
+            chunk_text = " ".join(chunk_blocks).strip()
             if chunk_text:
                 all_chunks.append({
                     "page_number": page_no,
@@ -192,20 +266,16 @@ def chunks_from_pages(pages: Dict[int,str], max_tokens:int=500, overlap:int=50):
                     "tokens": token_count
                 })
                 chunk_idx += 1
-            # backtrack for overlap: move i back by approx overlap words (in sentences)
-            # simple approach: step back by `overlap` words worth of sentences
-            # convert overlap words to sentences estimate:
-            back_words = overlap
-            original_i = i  # Track original position to prevent infinite loops
-            while back_words > 0 and i > 0:
-                i -= 1
-                back_words -= len(sents[i].split())
-                # Safety check: prevent infinite loop if we can't make progress
-                if i == 0 and back_words > 0:
-                    break
-            # ensure forward progress - don't go backwards more than half the chunk
-            if i < original_i - len(chunk_sentences) // 2:
-                i = original_i - len(chunk_sentences) // 2
-            if i < 0:
-                i = 0
+            
+            # Backtrack for overlap (by words, not blocks)
+            if i < len(blocks):
+                back_words = overlap
+                temp_i = i - 1
+                while back_words > 0 and temp_i >= 0:
+                    block_words = len(blocks[temp_i].split())
+                    back_words -= block_words
+                    temp_i -= 1
+                # Move back but ensure forward progress
+                i = max(temp_i + 1, i - len(chunk_blocks) // 2)
+    
     return all_chunks

@@ -18,7 +18,8 @@ router = APIRouter()
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+# GROQ_MODEL = os.getenv("GROQ_MODEL", "meta-llama/llama-4-scout-17b-16e-instruct")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 JWT_SECRET = os.getenv("JWT_SECRET", "change-me")
 
 # Hugging Face Inference API Configuration
@@ -281,7 +282,7 @@ async def query_rag(req: QueryRequest, authorization: str = Header(...)):
         completion = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=messages,
-            temperature=0.1,
+            temperature=0.2,
             max_tokens=1024,
             top_p=0.9,
         )
