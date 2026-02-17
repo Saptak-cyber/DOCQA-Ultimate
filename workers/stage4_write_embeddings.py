@@ -173,6 +173,18 @@ def process_job(job):
 
     log_info(f"Stage 4: Received {len(emb_list)} embeddings for doc {doc_id}")
 
+    # Check if document was deleted (safeguard against race conditions)
+    try:
+        doc = documents_col.find_one({"_id": ObjectId(doc_id)})
+        if doc and doc.get("status") == "deleted":
+            log_warn(f"Document {doc_id} was deleted, skipping processing")
+            # Clean up tracking state
+            state_key = f"stage4_state:{doc_id}"
+            r.delete(state_key)
+            return
+    except Exception as e:
+        log_warn(f"Failed to check document status: {e}")
+
     # Validate embedding dimensions before attempting writes
     if emb_list:
         first_emb_dim = len(emb_list[0]["embedding"])

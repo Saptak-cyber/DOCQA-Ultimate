@@ -188,8 +188,12 @@ async def upload_file(file: UploadFile = File(...), authorization: str = Header(
     data = await file.read()
     sha = hashlib.sha256(data).hexdigest()
 
-    # Check duplicates by hash or cloudinary public_id (we use hash here)
-    existing = documents_col.find_one({"metadata.hash": sha, "userId": user_id})
+    # Check duplicates by hash (exclude deleted documents)
+    existing = documents_col.find_one({
+        "metadata.hash": sha, 
+        "userId": user_id,
+        "status": {"$ne": "deleted"}  # Exclude deleted documents
+    })
     if existing:
         return JSONResponse({"status": "exists", "document_id": str(existing["_id"])}, status_code=200)
 
@@ -273,11 +277,13 @@ async def list_documents(authorization: str = Header(...)):
 async def delete_document(document_id: str, authorization: str = Header(...)):
     """
     Delete a document and all associated data:
-    1. Delete file from Supabase Storage
-    2. Delete chunks from Supabase
-    3. Delete document-level embedding from documents_index
-    4. Delete document from Supabase documents table
-    5. Delete document from MongoDB
+    1. Mark document as deleted in MongoDB (prevents worker race conditions)
+    2. Clear Redis tracking keys
+    3. Delete file from Supabase Storage
+    4. Delete chunks from Supabase
+    5. Delete document-level embedding from documents_index
+    6. Delete document from Supabase documents table
+    7. Delete document from MongoDB
     """
     user_id = get_user_id_from_jwt(authorization)
     user_id_uuid = convert_user_id_to_uuid(user_id)
@@ -291,6 +297,24 @@ async def delete_document(document_id: str, authorization: str = Header(...)):
         if isinstance(e, HTTPException):
             raise
         raise HTTPException(status_code=400, detail=f"Invalid document ID: {str(e)}")
+    
+    # Step 2: Mark document as deleted immediately (prevents workers from processing)
+    try:
+        documents_col.update_one(
+            {"_id": ObjectId(document_id)},
+            {"$set": {"status": "deleted", "deletedAt": datetime.datetime.now(datetime.timezone.utc)}}
+        )
+        print(f"✅ Marked document {document_id} as deleted")
+    except Exception as e:
+        print(f"⚠️ Failed to mark document as deleted: {str(e)}")
+    
+    # Step 3: Clear Redis tracking keys (prevents orphaned data)
+    try:
+        chunk_index_key = f"stage2_chunk_idx:{document_id}"
+        r.delete(chunk_index_key)
+        print(f"✅ Cleared Redis tracking keys for document {document_id}")
+    except Exception as e:
+        print(f"⚠️ Failed to clear Redis keys: {str(e)}")
     
     storage_info = doc.get("storage", {})
     storage_path = storage_info.get("path")

@@ -182,6 +182,11 @@ def process_job(job):
                 }
             )
             return
+        
+        # Check if document was deleted (safeguard against race conditions)
+        if doc.get("status") == "deleted":
+            log_warn(f"Document {doc_id} was deleted, skipping processing")
+            return
     except Exception as e:
         log_error(f"Error querying MongoDB for document {doc_id}: {e}")
         return

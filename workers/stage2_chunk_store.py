@@ -196,6 +196,21 @@ def process_job(job):
     total_pages = job.get("total_pages", 0)
     pages_processed = job.get("pages_processed", 0)
     
+    # Check if document was deleted (safeguard against race conditions)
+    try:
+        doc = documents_col.find_one({"_id": ObjectId(doc_id)})
+        if doc and doc.get("status") == "deleted":
+            log_warn(f"Document {doc_id} was deleted, skipping processing")
+            # Clean up chunk index if exists
+            chunk_index_key = f"stage2_chunk_idx:{doc_id}"
+            try:
+                r.delete(chunk_index_key)
+            except Exception:
+                pass
+            return
+    except Exception as e:
+        log_warn(f"Failed to check document status: {e}")
+    
     if pages:
         # Streaming mode: pages are in the job payload
         log_info(f"✅ Received {len(pages)} pages from Stage 1 queue (streaming mode)")
@@ -208,6 +223,11 @@ def process_job(job):
             if not doc:
                 log_error(f"❌ Document {doc_id} not found in MongoDB")
                 raise ValueError(f"Document {doc_id} not found in MongoDB")
+            
+            # Check if deleted
+            if doc.get("status") == "deleted":
+                log_warn(f"Document {doc_id} was deleted, skipping processing")
+                return
             
             pages = doc.get("pages_text", {})
             if not pages:

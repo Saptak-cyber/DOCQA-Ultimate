@@ -144,6 +144,16 @@ def process_job(job):
     log(f"---- Starting Stage3 for document {doc_id} (user {user_id}) ----")
     log(f"Using Hugging Face Inference API: {HF_EMBED_MODEL}")
 
+    # Check if document was deleted (safeguard against race conditions)
+    if documents_col is not None:
+        try:
+            doc = documents_col.find_one({"_id": ObjectId(doc_id)})
+            if doc and doc.get("status") == "deleted":
+                log(f"⚠️ Document {doc_id} was deleted, skipping processing")
+                return
+        except Exception as e:
+            log(f"⚠️ Failed to check document status: {e}")
+
      # Fetch chunks WITHOUT embeddings (with pagination to handle >1000 chunks)
     log("Fetching chunks without embeddings...")
     chunks = []
