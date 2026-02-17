@@ -1,5 +1,6 @@
 'use client';
 
+import React from 'react';
 import { QueryResponse as QueryResponseType } from '@/types/query';
 import { Card } from '@/components/ui/Card';
 import { SourceList } from './SourceList';
@@ -13,16 +14,12 @@ interface QueryResponseProps {
 }
 
 export function QueryResponse({ response }: QueryResponseProps) {
-  // Preprocess markdown to ensure proper spacing around code blocks
+  // Preprocess markdown to ensure proper spacing around code blocks (triple backticks only)
   const processedAnswer = response.answer
-    // Add newlines before code blocks if missing
-    .replace(/([^\n])(```)/g, '$1\n\n$2')
-    // Add newlines after code blocks if missing
-    .replace(/(```\n?)([^\n])/g, '$1\n$2')
-    // Fix numbered lists followed by code blocks
-    .replace(/(\d+\.\s+[^\n]+)(```)/g, '$1\n\n$2');
-  
-  console.log('Processed markdown:', processedAnswer);
+    // Add newlines before code blocks if missing (only triple backticks)
+    .replace(/([^\n])(```[a-z]*\n)/g, '$1\n\n$2')
+    // Add newlines after code blocks if missing (only triple backticks)
+    .replace(/(```\n?)([^\n`])/g, '$1\n$2');
   
   return (
     <div className="space-y-4">
@@ -34,28 +31,39 @@ export function QueryResponse({ response }: QueryResponseProps) {
             rehypePlugins={[rehypeRaw, rehypeHighlight]}
             components={{
               code({ node, inline, className, children, ...props }: any) {
-                // Check if this is a code block (has language class or is not inline)
-                if (!inline) {
+                const match = /language-(\w+)/.exec(className || '');
+                
+                // Inline code (single backticks) - light background
+                if (inline && !match) {
                   return (
-                    <code 
-                      className={`block bg-gray-900 text-gray-100 rounded-lg p-4 overflow-x-auto font-mono text-sm leading-relaxed whitespace-pre ${className || ''}`}
-                      {...props}
-                    >
+                    <code className="bg-gray-100 text-primary-700 px-1.5 py-0.5 rounded text-sm font-mono" {...props}>
                       {children}
                     </code>
                   );
                 }
                 
-                // Inline code
+                // Code block (triple backticks) - dark background
                 return (
-                  <code className="bg-gray-100 text-primary-700 px-1.5 py-0.5 rounded text-sm font-mono" {...props}>
+                  <code 
+                    className={`block bg-gray-900 text-gray-100 rounded-lg p-4 overflow-x-auto font-mono text-sm leading-relaxed whitespace-pre ${className || ''}`}
+                    {...props}
+                  >
                     {children}
                   </code>
                 );
               },
-              pre({ children }: any) {
-                // Wrap code blocks with proper spacing
-                return <div className="my-4">{children}</div>;
+              pre({ children, ...props }: any) {
+                // Only wrap actual code blocks (children should be a code element)
+                const isCodeBlock = React.Children.toArray(children).some(
+                  (child: any) => child?.type === 'code'
+                );
+                
+                if (isCodeBlock) {
+                  return <div className="my-4">{children}</div>;
+                }
+                
+                // Not a code block, render as-is
+                return <pre {...props}>{children}</pre>;
               },
               h1: ({ children }: any) => (
                 <h1 className="text-2xl font-bold text-gray-900 mt-6 mb-4 break-words">{children}</h1>

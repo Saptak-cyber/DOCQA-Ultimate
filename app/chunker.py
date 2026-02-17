@@ -16,9 +16,16 @@ def extract_pages_from_pdf_bytes(pdf_bytes: bytes) -> Dict[int, str]:
                 # Use layout=True for better structure preservation (especially for code)
                 text = page.extract_text(layout=True) or ""
                 # Normalize whitespace for embeddings (but preserve structure)
-                text = re.sub(r"[ \t]+", " ", text)  # Normalize spaces/tabs
-                text = re.sub(r"\n\s*\n", "\n", text)  # Remove excessive blank lines
-                text = re.sub(r"\s+", " ", text).strip()  # Final normalization
+                # 1. Handle hyphenated line breaks (word- \n word -> word-word)
+                text = re.sub(r"-\s*\n\s*", "-", text)
+                # 2. Handle regular line breaks (join words split across lines)
+                text = re.sub(r"(\w)\s*\n\s*(\w)", r"\1 \2", text)
+                # 3. Normalize spaces/tabs
+                text = re.sub(r"[ \t]+", " ", text)
+                # 4. Remove excessive blank lines
+                text = re.sub(r"\n+", "\n", text)
+                # 5. Final normalization - collapse remaining whitespace
+                text = re.sub(r"\s+", " ", text).strip()
                 pages[i + 1] = text
     except Exception as e:
         # Fallback to pypdf if pdfplumber fails
@@ -27,6 +34,11 @@ def extract_pages_from_pdf_bytes(pdf_bytes: bytes) -> Dict[int, str]:
             reader = PdfReader(io.BytesIO(pdf_bytes))
             for i, page in enumerate(reader.pages):
                 text = page.extract_text() or ""
+                # Apply same normalization as pdfplumber
+                text = re.sub(r"-\s*\n\s*", "-", text)
+                text = re.sub(r"(\w)\s*\n\s*(\w)", r"\1 \2", text)
+                text = re.sub(r"[ \t]+", " ", text)
+                text = re.sub(r"\n+", "\n", text)
                 text = re.sub(r"\s+", " ", text).strip()
                 pages[i + 1] = text
         except Exception as fallback_error:
@@ -55,9 +67,16 @@ def extract_pages_streaming(pdf_source: Union[str, bytes]) -> Generator[Tuple[in
                 # Use layout=True for better structure preservation (especially for code)
                 text = page.extract_text(layout=True) or ""
                 # Normalize whitespace for embeddings (but preserve structure)
-                text = re.sub(r"[ \t]+", " ", text)  # Normalize spaces/tabs
-                text = re.sub(r"\n\s*\n", "\n", text)  # Remove excessive blank lines
-                text = re.sub(r"\s+", " ", text).strip()  # Final normalization
+                # 1. Handle hyphenated line breaks (word- \n word -> word-word)
+                text = re.sub(r"-\s*\n\s*", "-", text)
+                # 2. Handle regular line breaks (join words split across lines)
+                text = re.sub(r"(\w)\s*\n\s*(\w)", r"\1 \2", text)
+                # 3. Normalize spaces/tabs
+                text = re.sub(r"[ \t]+", " ", text)
+                # 4. Remove excessive blank lines
+                text = re.sub(r"\n+", "\n", text)
+                # 5. Final normalization - collapse remaining whitespace
+                text = re.sub(r"\s+", " ", text).strip()
                 yield (i + 1, text)  # page_number is 1-based
     except Exception as e:
         # Fallback to pypdf if pdfplumber fails
@@ -69,6 +88,11 @@ def extract_pages_streaming(pdf_source: Union[str, bytes]) -> Generator[Tuple[in
                 reader = PdfReader(io.BytesIO(pdf_source))
             for i, page in enumerate(reader.pages):
                 text = page.extract_text() or ""
+                # Apply same normalization as pdfplumber
+                text = re.sub(r"-\s*\n\s*", "-", text)
+                text = re.sub(r"(\w)\s*\n\s*(\w)", r"\1 \2", text)
+                text = re.sub(r"[ \t]+", " ", text)
+                text = re.sub(r"\n+", "\n", text)
                 text = re.sub(r"\s+", " ", text).strip()
                 yield (i + 1, text)
         except Exception as fallback_error:
@@ -107,13 +131,15 @@ def get_pdf_page_count(pdf_source: Union[str, bytes]) -> int:
 def split_into_semantic_blocks(text: str):
     """
     Split text into semantic blocks that respect document structure:
-    - Paragraphs (double newlines)
-    - Numbered/bulleted lists (keep together)
+    - Paragraphs (kept as complete units)
+    - Numbered/bulleted lists (kept as complete units)
     - Headers and sections
+    
+    Each block is a complete semantic unit (paragraph or list).
     """
     blocks = []
     
-    # Split by double newlines (paragraphs) first
+    # Split by double newlines (paragraphs) or list boundaries
     paragraphs = re.split(r'\n\s*\n', text)
     
     for para in paragraphs:
@@ -122,19 +148,13 @@ def split_into_semantic_blocks(text: str):
             continue
         
         # Check if this is a list (numbered or bulleted)
-        # Pattern: starts with number/bullet and has multiple items
         list_pattern = r'^[\s]*(?:\d+[\.\)]\s+|[-•*]\s+)'
         if re.match(list_pattern, para):
-            # Check if it contains multiple list items
-            list_items = re.split(r'\n(?=[\s]*(?:\d+[\.\)]\s+|[-•*]\s+))', para)
-            if len(list_items) > 1:
-                # Keep the entire list together as one block
-                blocks.append(para)
-                continue
-        
-        # For regular paragraphs, split into sentences if too long
-        sentences = re.split(r'(?<=[.?!])\s+', para)
-        blocks.extend([s.strip() for s in sentences if s.strip()])
+            # This is a list - keep it as one complete block
+            blocks.append(para)
+        else:
+            # Regular paragraph - keep as one complete block
+            blocks.append(para)
     
     return blocks
 
@@ -145,7 +165,14 @@ def split_into_sentences(text: str):
 
 def chunks_from_page(page_text: str, page_number: int, start_chunk_idx: int = 0, max_tokens: int = 500, overlap: int = 50):
     """
-    Chunk a single page of text using semantic blocks (respects paragraphs, lists, etc.).
+    Chunk a single page of text using semantic blocks.
+    
+    Strategy:
+    - Target chunk size is max_tokens (500 words)
+    - When we reach 500 words, we CONTINUE to add the next paragraph/list to complete it
+    - This ensures chunks don't cut off mid-paragraph or mid-list
+    - Chunks will typically be >= 500 words (unless the page ends)
+    
     start_chunk_idx: Starting chunk index (for maintaining global chunk numbering across pages)
     """
     if not page_text or not page_text.strip():
@@ -162,30 +189,22 @@ def chunks_from_page(page_text: str, page_number: int, start_chunk_idx: int = 0,
     while i < len(blocks):
         chunk_blocks = []
         token_count = 0
+        reached_target = False
         
-        # Add blocks until we hit the token limit
+        # Add blocks until we complete a semantic unit after reaching the target
         while i < len(blocks):
             block_words = len(blocks[i].split())
             
-            # If adding this block would exceed limit and we already have content, stop
-            if token_count > 0 and token_count + block_words > max_tokens:
-                break
-            
-            # If a single block is larger than max_tokens, split it by sentences
-            if block_words > max_tokens:
-                sentences = split_into_sentences(blocks[i])
-                for sent in sentences:
-                    sent_words = len(sent.split())
-                    if token_count + sent_words > max_tokens and token_count > 0:
-                        break
-                    chunk_blocks.append(sent)
-                    token_count += sent_words
-                i += 1
-                break
-            
+            # Add this block
             chunk_blocks.append(blocks[i])
             token_count += block_words
             i += 1
+            
+            # Check if we've reached the target size
+            if token_count >= max_tokens:
+                reached_target = True
+                # We've reached target, but we completed this block, so stop here
+                break
         
         chunk_text = " ".join(chunk_blocks).strip()
         if chunk_text:
@@ -197,23 +216,28 @@ def chunks_from_page(page_text: str, page_number: int, start_chunk_idx: int = 0,
             })
             chunk_idx += 1
         
-        # Backtrack for overlap (by words, not blocks)
-        if i < len(blocks):
+        # Backtrack for overlap (go back by overlap words worth of blocks)
+        if i < len(blocks) and overlap > 0:
             back_words = overlap
             temp_i = i - 1
             while back_words > 0 and temp_i >= 0:
                 block_words = len(blocks[temp_i].split())
                 back_words -= block_words
                 temp_i -= 1
-            # Move back but ensure forward progress
-            i = max(temp_i + 1, i - len(chunk_blocks) // 2)
+            # Move back but ensure forward progress (at least move forward by 1 block)
+            i = max(temp_i + 1, i - len(chunk_blocks) + 1)
     
     return chunks
 
 def chunks_from_pages(pages: Dict[int,str], max_tokens:int=500, overlap:int=50):
     """
     Create semantic chunks from pages that respect document structure.
-    Uses semantic blocks (paragraphs, lists) instead of just sentences.
+    
+    Strategy:
+    - Target chunk size is max_tokens (500 words)
+    - When we reach 500 words, we CONTINUE to add the next paragraph/list to complete it
+    - This ensures chunks don't cut off mid-paragraph or mid-list
+    - Chunks will typically be >= 500 words (unless the page ends)
     """
     if not pages:
         return []
@@ -232,30 +256,22 @@ def chunks_from_pages(pages: Dict[int,str], max_tokens:int=500, overlap:int=50):
         while i < len(blocks):
             chunk_blocks = []
             token_count = 0
+            reached_target = False
             
-            # Add blocks until we hit the token limit
+            # Add blocks until we complete a semantic unit after reaching the target
             while i < len(blocks):
                 block_words = len(blocks[i].split())
                 
-                # If adding this block would exceed limit and we already have content, stop
-                if token_count > 0 and token_count + block_words > max_tokens:
-                    break
-                
-                # If a single block is larger than max_tokens, split it by sentences
-                if block_words > max_tokens:
-                    sentences = split_into_sentences(blocks[i])
-                    for sent in sentences:
-                        sent_words = len(sent.split())
-                        if token_count + sent_words > max_tokens and token_count > 0:
-                            break
-                        chunk_blocks.append(sent)
-                        token_count += sent_words
-                    i += 1
-                    break
-                
+                # Add this block
                 chunk_blocks.append(blocks[i])
                 token_count += block_words
                 i += 1
+                
+                # Check if we've reached the target size
+                if token_count >= max_tokens:
+                    reached_target = True
+                    # We've reached target, but we completed this block, so stop here
+                    break
             
             chunk_text = " ".join(chunk_blocks).strip()
             if chunk_text:
@@ -267,15 +283,15 @@ def chunks_from_pages(pages: Dict[int,str], max_tokens:int=500, overlap:int=50):
                 })
                 chunk_idx += 1
             
-            # Backtrack for overlap (by words, not blocks)
-            if i < len(blocks):
+            # Backtrack for overlap (go back by overlap words worth of blocks)
+            if i < len(blocks) and overlap > 0:
                 back_words = overlap
                 temp_i = i - 1
                 while back_words > 0 and temp_i >= 0:
                     block_words = len(blocks[temp_i].split())
                     back_words -= block_words
                     temp_i -= 1
-                # Move back but ensure forward progress
-                i = max(temp_i + 1, i - len(chunk_blocks) // 2)
+                # Move back but ensure forward progress (at least move forward by 1 block)
+                i = max(temp_i + 1, i - len(chunk_blocks) + 1)
     
     return all_chunks
