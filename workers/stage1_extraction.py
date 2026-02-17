@@ -105,7 +105,7 @@ def stream_pdf_from_supabase(bucket: str, path: str, doc_id: str) -> tuple:
         
         # Stream download in chunks to avoid memory overload
         downloaded_bytes = 0
-        chunk_size = 10 * 1024 * 1024  # 10MB chunks
+        chunk_size = 5 * 1024 * 1024  # 5MB chunks (reduced from 10MB for Render's 512MB limit)
         
         with httpx.stream("GET", download_url, timeout=300.0) as response:
             response.raise_for_status()
@@ -274,10 +274,10 @@ def process_job(job):
         
         # Use file size (not page count) to determine streaming vs batch mode
         # File size directly correlates with memory usage, while page count varies by content density
-        # Threshold: 20MB ensures safe operation within 512MB RAM limit
-        # - Batch mode (<20MB): Fast processing for small PDFs, peak memory ~100-150MB
-        # - Streaming mode (≥20MB): Memory-safe for large PDFs, peak memory ~50-80MB
-        STREAMING_THRESHOLD_MB = 10
+        # Threshold: 2MB ensures safe operation within 512MB RAM limit on Render
+        # - Batch mode (<2MB): Fast processing for tiny PDFs, peak memory ~50-100MB
+        # - Streaming mode (≥2MB): Memory-safe for all other PDFs, peak memory ~30-60MB
+        STREAMING_THRESHOLD_MB = int(os.getenv("STREAMING_THRESHOLD_MB", "2"))
         USE_STREAMING = actual_file_size_mb >= STREAMING_THRESHOLD_MB
         
         log_info(f"File size: {actual_file_size_mb:.2f}MB, Threshold: {STREAMING_THRESHOLD_MB}MB, Using {'STREAMING' if USE_STREAMING else 'BATCH'} mode")
@@ -286,7 +286,7 @@ def process_job(job):
             log_info(f"Using streaming extraction for large document ({total_pages} pages)")
             # Stream pages and send to Stage 2 queue incrementally
             pages_processed = 0
-            PAGE_BATCH_SIZE = 50  # Reduced from 100 to 50 for tighter memory control
+            PAGE_BATCH_SIZE = int(os.getenv("PAGE_BATCH_SIZE", "10"))  # Reduced to 10 for Render's 512MB limit
             
             current_batch = {}
             for page_num, page_text in extract_pages_streaming(pdf_temp_path):
@@ -310,8 +310,9 @@ def process_job(job):
                     Thread(target=wake_worker_async, args=(WORKER_STAGE2_URL,), daemon=True).start()
                     
                     current_batch = {}
-                    # Force garbage collection after each batch to free memory
+                    # Force aggressive garbage collection after each batch to free memory
                     gc.collect()
+                    gc.collect()  # Run twice for more thorough cleanup
             
             log_info(f"✅ Streaming extraction complete: {pages_processed}/{total_pages} pages sent to Stage 2")
             mem_final = get_memory_usage_mb()
