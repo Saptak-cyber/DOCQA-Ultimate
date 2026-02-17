@@ -1,6 +1,6 @@
 'use client';
 
-import React from 'react';
+import React, { useState } from 'react';
 import { QueryResponse as QueryResponseType } from '@/types/query';
 import { Card } from '@/components/ui/Card';
 import { SourceList } from './SourceList';
@@ -13,7 +13,46 @@ interface QueryResponseProps {
   response: QueryResponseType;
 }
 
+// Helper to parse and render text with inline citations
+function renderTextWithCitations(text: string, onCitationClick: (index: number) => void) {
+  // Match citation patterns like [1], [2], etc.
+  const parts = text.split(/(\[\d+\])/g);
+  
+  return parts.map((part, idx) => {
+    const match = part.match(/\[(\d+)\]/);
+    if (match) {
+      const citationNum = parseInt(match[1], 10);
+      return (
+        <sup
+          key={idx}
+          className="inline-flex items-center justify-center w-5 h-5 ml-0.5 text-xs font-medium text-white bg-blue-600 rounded cursor-pointer hover:bg-blue-700 transition-colors"
+          onClick={() => onCitationClick(citationNum - 1)}
+          title={`View source ${citationNum}`}
+        >
+          {citationNum}
+        </sup>
+      );
+    }
+    return <span key={idx}>{part}</span>;
+  });
+}
+
 export function QueryResponse({ response }: QueryResponseProps) {
+  const [highlightedSource, setHighlightedSource] = useState<number | null>(null);
+
+  const handleCitationClick = (sourceIndex: number) => {
+    setHighlightedSource(sourceIndex);
+    // Scroll to sources section
+    setTimeout(() => {
+      const sourcesElement = document.getElementById('sources-section');
+      if (sourcesElement) {
+        sourcesElement.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      }
+    }, 100);
+    // Clear highlight after 3 seconds
+    setTimeout(() => setHighlightedSource(null), 3000);
+  };
+
   // Preprocess markdown to ensure proper spacing around code blocks (triple backticks only)
   const processedAnswer = response.answer
     // Add newlines before code blocks if missing (only triple backticks)
@@ -35,6 +74,15 @@ export function QueryResponse({ response }: QueryResponseProps) {
                 
                 // Inline code (single backticks) - light background
                 if (inline && !match) {
+                  // Check if inline code contains citations
+                  const text = String(children);
+                  if (/\[\d+\]/.test(text)) {
+                    return (
+                      <code className="bg-gray-100 text-primary-700 px-1.5 py-0.5 rounded text-sm font-mono" {...props}>
+                        {renderTextWithCitations(text, handleCitationClick)}
+                      </code>
+                    );
+                  }
                   return (
                     <code className="bg-gray-100 text-primary-700 px-1.5 py-0.5 rounded text-sm font-mono" {...props}>
                       {children}
@@ -42,13 +90,27 @@ export function QueryResponse({ response }: QueryResponseProps) {
                   );
                 }
                 
-                // Code block (triple backticks) - dark background
+                // Code block (triple backticks) - dark background with citation support
+                const codeText = String(children);
+                const lines = codeText.split('\n');
+                
                 return (
                   <code 
                     className={`block bg-gray-900 text-gray-100 rounded-lg p-4 overflow-x-auto font-mono text-sm leading-relaxed whitespace-pre ${className || ''}`}
                     {...props}
                   >
-                    {children}
+                    {lines.map((line, idx) => {
+                      // Check if line contains citations
+                      if (/\[\d+\]/.test(line)) {
+                        return (
+                          <span key={idx} className="block">
+                            {renderTextWithCitations(line, handleCitationClick)}
+                            {idx < lines.length - 1 ? '\n' : ''}
+                          </span>
+                        );
+                      }
+                      return line + (idx < lines.length - 1 ? '\n' : '');
+                    })}
                   </code>
                 );
               },
@@ -74,9 +136,29 @@ export function QueryResponse({ response }: QueryResponseProps) {
               h3: ({ children }: any) => (
                 <h3 className="text-lg font-semibold text-gray-900 mt-4 mb-2 break-words">{children}</h3>
               ),
-              p: ({ children }: any) => (
-                <p className="text-gray-700 mb-3 leading-relaxed break-words">{children}</p>
-              ),
+              p: ({ children }: any) => {
+                // Check if paragraph contains citations
+                const text = React.Children.toArray(children)
+                  .map(child => typeof child === 'string' ? child : '')
+                  .join('');
+                
+                if (/\[\d+\]/.test(text)) {
+                  return (
+                    <p className="text-gray-700 mb-3 leading-relaxed break-words">
+                      {React.Children.map(children, (child) => {
+                        if (typeof child === 'string') {
+                          return renderTextWithCitations(child, handleCitationClick);
+                        }
+                        return child;
+                      })}
+                    </p>
+                  );
+                }
+                
+                return (
+                  <p className="text-gray-700 mb-3 leading-relaxed break-words">{children}</p>
+                );
+              },
               ul: ({ children }: any) => (
                 <ul className="list-disc list-outside ml-6 mb-4 space-y-2 text-gray-700">{children}</ul>
               ),
@@ -133,7 +215,9 @@ export function QueryResponse({ response }: QueryResponseProps) {
       </Card>
 
       {response.sources && response.sources.length > 0 && (
-        <SourceList sources={response.sources} />
+        <div id="sources-section">
+          <SourceList sources={response.sources} highlightedIndex={highlightedSource} />
+        </div>
       )}
     </div>
   );

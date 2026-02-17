@@ -9,9 +9,10 @@ import { Button } from '@/components/ui/Button';
 
 interface SourceListProps {
   sources: Source[];
+  highlightedIndex?: number | null;
 }
 
-export function SourceList({ sources }: SourceListProps) {
+export function SourceList({ sources, highlightedIndex }: SourceListProps) {
   const [expandedIndex, setExpandedIndex] = useState<number | null>(null);
   const [showAll, setShowAll] = useState(false);
 
@@ -49,14 +50,27 @@ export function SourceList({ sources }: SourceListProps) {
 
       <div className="space-y-3">
         {displayedSources.map((source, index) => (
-          <SourceCard
+          <div
             key={index}
-            source={source}
-            isExpanded={expandedIndex === index}
-            onToggle={() =>
-              setExpandedIndex(expandedIndex === index ? null : index)
-            }
-          />
+            className={`transition-all duration-300 ${
+              highlightedIndex === index ? 'ring-2 ring-blue-500 rounded-lg' : ''
+            }`}
+          >
+            <div className="flex items-start space-x-2">
+              <span className="inline-flex items-center justify-center w-6 h-6 mt-1 text-xs font-medium text-white bg-blue-600 rounded flex-shrink-0">
+                {index + 1}
+              </span>
+              <div className="flex-1">
+                <SourceCard
+                  source={source}
+                  isExpanded={expandedIndex === index}
+                  onToggle={() =>
+                    setExpandedIndex(expandedIndex === index ? null : index)
+                  }
+                />
+              </div>
+            </div>
+          </div>
         ))}
       </div>
     </Card>

@@ -170,13 +170,13 @@ def get_document_titles(doc_ids: List[str]) -> dict:
 def build_prompt(query: str, chunks: List[dict], doc_titles: dict, conversation_history: List[dict] = None) -> tuple:
     """Build prompt with context chunks, citations, and conversation history."""
     context_str = ""
-    for c in chunks:
+    for idx, c in enumerate(chunks, 1):
         doc_id = c.get("document_id", "Unknown")
         doc_title = doc_titles.get(doc_id, f"Document {doc_id[:8]}")
         page = c.get("page_number", "?")
         text = c.get("text", "")
         context_str += (
-            f"\n[{doc_title}, Page: {page}]\n"
+            f"\n[Source {idx}: {doc_title}, Page: {page}]\n"
             f"{text}\n"
         )
     
@@ -186,8 +186,17 @@ If the user asks for an answer from a particular document by name, prioritize in
 
 If the answer is not in the context, reply: "I don't know based on the provided documents."
 
-Include citations in this format exactly:
-(Page X from [Document Title])"""
+IMPORTANT: When citing sources, use inline citation numbers like this:
+- For regular text: "This is a fact [1]."
+- For code blocks and technical content: Add citation numbers at the end of relevant lines or sections using the format [1], [2], etc.
+- Each [Source N] in the context corresponds to citation number [N]
+
+Example with code:
+```java
+public class Example extends Base {  [1]
+    // This demonstrates inheritance  [1]
+}
+```"""
     
     # Build messages array with conversation history
     messages = [{"role": "system", "content": system_message}]
